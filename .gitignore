@@ -1,0 +1,18 @@
+# Python bytecode y temporales
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.tmp
+
+# Archivos pesados o volcados temporales
+*.img
+*.iso
+*.tar.gz
+*.dmp
+*.core
+
+# Respaldos de editores
+*~
+*.swp
+*.bak
