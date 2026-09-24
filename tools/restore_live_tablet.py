@@ -83,7 +83,19 @@ def main():
     print("    [OK] tablet_battery_daemon reiniciado.")
     
     # 4. Restaurar Subsistema de Pantalla y Phosh
-    print("\n--- [3/4] Restaurando Pantalla y Perfil Phoc ---")
+    print("\n--- [3/4] Restaurando Pantalla, Brillo y Perfil Phoc ---")
+    # Restaurar nodo de brillo
+    run_remote("mkdir -p /tmp/fake_backlight/lcd-backlight && "
+               "ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/brightness && "
+               "ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/actual_brightness && "
+               "ln -sf /sys/class/leds/lcd-backlight/max_brightness /tmp/fake_backlight/lcd-backlight/max_brightness && "
+               "echo raw > /tmp/fake_backlight/lcd-backlight/type && "
+               "chmod -R 777 /tmp/fake_backlight && "
+               "chmod 666 /sys/class/leds/lcd-backlight/brightness && "
+               "mount --bind /tmp/fake_backlight /sys/class/backlight 2>/dev/null; "
+               "mount --bind /tmp/fake_backlight /sysroot/sys/class/backlight 2>/dev/null; "
+               "udevadm trigger --subsystem-match=backlight 2>/dev/null || true")
+    print("    [OK] Nodo /sys/class/backlight/lcd-backlight montado y enlazado.")
     disp_dir = os.path.join(ROOT_DIR, "subsistemas", "03_pantalla_rotacion_touch")
     send_file_content(os.path.join(disp_dir, "phoc.ini"), "/etc/phoc.ini")
     

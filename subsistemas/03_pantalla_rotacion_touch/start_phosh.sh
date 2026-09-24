@@ -142,6 +142,19 @@ scale=1.0
 rotate=180
 PHOCEOF
 
+
+# Configurar emulación de subsistema /sys/class/backlight para Phosh y GNOME
+mkdir -p /tmp/fake_backlight/lcd-backlight
+ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/brightness 2>/dev/null || true
+ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/actual_brightness 2>/dev/null || true
+ln -sf /sys/class/leds/lcd-backlight/max_brightness /tmp/fake_backlight/lcd-backlight/max_brightness 2>/dev/null || true
+echo raw > /tmp/fake_backlight/lcd-backlight/type 2>/dev/null || true
+chmod -R 777 /tmp/fake_backlight 2>/dev/null || true
+chmod 666 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+mount --bind /tmp/fake_backlight /sys/class/backlight 2>/dev/null || true
+mount --bind /tmp/fake_backlight /sysroot/sys/class/backlight 2>/dev/null || true
+udevadm trigger --subsystem-match=backlight 2>/dev/null || true
+
 # Brillo al 100% inicial
 echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
