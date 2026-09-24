@@ -5,6 +5,10 @@
 ---
 
 ## 1. VISIÓN GENERAL Y OBJETIVO DEL REPOSITORIO
+## 1. VISIÓN GENERAL Y OBJETIVO DEL REPOSITORIO
+> [!IMPORTANT]
+> **PRINCIPIO DE RENDIMIENTO GRÁFICO:**
+> La aceleración gráfica en este dispositivo debe ser realizada **exclusivamente por los núcleos de silicio de la GPU física ARM Mali-G57 MC2**, descartando definitivamente cualquier fallback de renderizado por software en la CPU (`pixman`, `llvmpipe`, `softpipe`). La meta es desahogar la CPU y lograr 60 fps en la interfaz y en reproducción de video.
 Este repositorio reúne y organiza **todas las soluciones de ingeniería, código fuente en C, scripts en Python/Shell, configuraciones probadas y microcódigos de firmware** que han llevado a estabilizar por completo la tablet UMIDIGI G7 Tab Pro corriendo postmarketOS Edge.
 
 El objetivo central es proporcionar un **entorno determinista y seguro**: cuando en el futuro se trabaje en nuevas metas complejas (como aceleración por hardware con GPU Mali-G57 o decodificación de video VPU), si alguna modificación altera o corrompe un subsistema ya funcional, **no será necesario reiniciar la investigación desde cero**. Con este repositorio se puede leer la documentación técnica, recompilar los binarios con `./build_all.sh` o restaurar la tablet en caliente en 3 segundos con `python3 tools/restore_live_tablet.py`.

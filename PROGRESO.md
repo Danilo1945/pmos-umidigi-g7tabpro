@@ -17,7 +17,12 @@
 
 ### 🎯 OBJETIVOS DE LA PRÓXIMA SESIÓN:
 
-#### 1. Aceleración Gráfica por Hardware GLOBAL para TODO el Sistema y Aplicaciones
+#### 1. Aceleración Gráfica por HARDWARE REAL GPU (ESTRICTAMENTE PROHIBIDO RENDERIZADO POR CPU)
+> [!CAUTION]
+> **REGLA FUNDAMENTAL DE SILICIO:**
+> - **ESTRICTAMENTE PROHIBIDO** el renderizado por software en la CPU (`pixman`, `llvmpipe`, `softpipe`, `swrast`, etc.).
+> - **OBLIGATORIO HARDWARE REAL GPU:** Todo el pipeline gráfico debe ejecutarse físicamente en los núcleos de cómputo y sombreado de la **GPU ARM Mali-G57 MC2** (Arquitectura Valhall) a través de `/dev/mali0` y la controladora DRM.
+> - La CPU debe quedar liberada (consumo < 10-15%) y los frames deben ser procesados directamente por el silicio gráfico.
 - **Alcance**: La aceleración NO debe limitarse a una sola app. Debe ser **global a nivel de sistema**:
   - **Compositor Wayland (`phoc` / wlroots)**: Reemplazar el renderizado por software (`WLR_RENDERER=pixman`) por el backend nativo acelerado GLES2/EGL (`mali` / `dri`).
   - **Entorno de Escritorio Phosh / GNOME**: Asegurar aceleración por hardware en la interfaz de usuario, animaciones y panel superior.
