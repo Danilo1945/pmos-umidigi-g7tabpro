@@ -79,8 +79,12 @@ def main():
     print("\n--- [2/4] Restaurando Subsistema de Batería ---")
     bat_dir = os.path.join(ROOT_DIR, "subsistemas", "02_bateria_energia")
     send_file_content(os.path.join(bat_dir, "tablet_battery_daemon.py"), "/usr/bin/tablet_battery_daemon.py")
-    run_remote("killall -9 tablet_battery_daemon.py 2>/dev/null; /usr/bin/tablet_battery_daemon.py &")
-    print("    [OK] tablet_battery_daemon reiniciado.")
+    send_file_content(os.path.join(bat_dir, "tablet_battery_daemon.py"), "/sysroot/usr/bin/tablet_battery_daemon.py")
+    if os.path.exists(os.path.join(bat_dir, "battery_daemon")):
+        send_file_content(os.path.join(bat_dir, "battery_daemon"), "/usr/bin/battery_daemon")
+        send_file_content(os.path.join(bat_dir, "battery_daemon"), "/sysroot/usr/bin/battery_daemon")
+    run_remote("pkill -f tablet_battery_daemon.py 2>/dev/null || true; killall battery_daemon 2>/dev/null || true; nohup chroot /sysroot /usr/bin/python3 -u /usr/bin/tablet_battery_daemon.py >/sysroot/var/log/battery_daemon.log 2>&1 &")
+    print("    [OK] tablet_battery_daemon v4 iniciado limpiamente con nohup.")
     
     # 4. Restaurar Subsistema de Pantalla y Phosh
     print("\n--- [3/4] Restaurando Pantalla, Brillo y Perfil Phoc ---")
@@ -98,6 +102,8 @@ def main():
     print("    [OK] Nodo /sys/class/backlight/lcd-backlight montado y enlazado.")
     disp_dir = os.path.join(ROOT_DIR, "subsistemas", "03_pantalla_rotacion_touch")
     send_file_content(os.path.join(disp_dir, "phoc.ini"), "/etc/phoc.ini")
+    send_file_content(os.path.join(disp_dir, "start_phosh.sh"), "/usr/bin/start_phosh.sh")
+    send_file_content(os.path.join(disp_dir, "start_phosh.sh"), "/sysroot/usr/bin/start_phosh.sh")
     
     # 5. Restaurar Subsistema de Wi-Fi
     print("\n--- [4/4] Restaurando Wi-Fi WMT ---")

@@ -158,13 +158,14 @@ La salida de audio estéreo cuádruple utiliza una arquitectura híbrida:
    - *Solución*: Se calcula el Voltaje en Circuito Abierto real ($V_{OCV}$):
      $$V_{OCV} = V_{bat} - (I_{bat} \cdot R_{int})$$
      Ese valor se interpola en una **Tabla OCV calibrada de 100 puntos** (desde 4.37V = 100% hasta 3.00V = 1%) y se filtra con un suavizador IIR exponencial ($\alpha = 0.2$).
-3. **Ausencia del Icono de Rayo de Carga en Phosh**:
+3. **Ausencia del Icono de Rayo de Carga o Icono Rojo en 0% en Phosh**:
    - El driver MTK no actualizaba `/sys/class/power_supply/battery/status` a `Charging`.
-   - *Solución de Ingeniería*: Demonio con técnica de **Bind Mount dinámico**:
-     ```bash
-     mount --bind /tmp/battery_fake_status /sys/class/power_supply/battery/status
-     ```
-     Al conectar el cargador ($I > 20\text{ mA}$ o MT6375 online), se escribe `Charging`, se monta sobre el sysfs y se emite el sonido oficial `power-plug.ogg`. Al desconectar, se pasa a `Discharging` y suena `power-unplug.ogg`.
+   - Además, si el daemon utilizaba `killall upowerd` para forzar la recarga, Phosh perdía de forma definitiva su conexión D-Bus con UPower (`PhoshBatteryManager`), provocando que la interfaz cayera en fallback: icono en rojo `battery-missing-symbolic` y porcentaje en `0%`.
+   - *Solución de Ingeniería Definitiva (Daemon v4)*:
+     - **Bind Mount Persistente**: Se monta `/tmp/battery_fake_status` sobre `/sys/class/power_supply/battery/status` de forma continua. Al conectar se escribe `Charging` y al desconectar `Discharging` de forma atómica.
+     - **Notificación Atómica a UPower**: En lugar de matar el daemon, se dispara `change` en `/sys/class/power_supply/battery/uevent` y se invoca el método D-Bus `org.freedesktop.UPower.Device.Refresh` vía `busctl`.
+     - **Feedback Acústico**: Emisión de `power-plug.ogg` al conectar y `power-unplug.ogg` al desconectar vía PipeWire.
+     - Esto permite que Phosh mantenga siempre activo el indicador, mostrando el porcentaje exacto y el rayo de carga en tiempo real.
 
 ---
 

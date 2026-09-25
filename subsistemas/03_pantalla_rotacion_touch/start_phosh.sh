@@ -14,9 +14,13 @@ insmod /lib/modules/tcpc_class.ko 2>/dev/null || insmod $MODDIR/tcpc_class.ko 2>
 insmod /lib/modules/mtk_chg_type_det.ko 2>/dev/null || insmod $MODDIR/mtk_chg_type_det.ko 2>/dev/null || true
 insmod /lib/modules/mt6358_battery.ko 2>/dev/null || insmod $MODDIR/mt6358_battery.ko 2>/dev/null || true
 
-# Iniciar battery_daemon
-if [ -x /usr/bin/battery_daemon ]; then
-    /usr/bin/battery_daemon >/dev/null 2>&1 &
+# Iniciar monitor de batería (preferir tablet_battery_daemon.py con audio, bind mount y OCV)
+if ! pgrep -f tablet_battery_daemon.py >/dev/null; then
+    if [ -f /usr/bin/tablet_battery_daemon.py ]; then
+        python3 -u /usr/bin/tablet_battery_daemon.py > /var/log/battery_daemon.log 2>&1 &
+    elif [ -x /usr/bin/battery_daemon ]; then
+        /usr/bin/battery_daemon >/dev/null 2>&1 &
+    fi
 fi
 
 # 2. Cargar Módulos de Audio y DSP

@@ -21,24 +21,27 @@
 ## 2. Problemas Superados
 1. **Porcentaje congelado en 50% o 1%**:
    - En kernels genéricos Android adaptados a Linux mainline/pmos, el daemon del espacio de usuario propietario de MediaTek no corre, dejando `UI_SOC` sin alimentar.
-2. **Ausencia del Icono de Carga (Rayo) en Phosh**:
+2. **Ausencia del Icono de Carga (Rayo) o Icono Rojo en 0% en Phosh**:
    - El nodo `/sys/class/power_supply/battery/status` permanecía permanentemente en `Discharging` o `Not charging` porque el driver MTK espera órdenes privativas del HAL de Android.
+   - En implementaciones previas, se ejecutaba `killall upowerd` al cambiar el estado. Al ser eliminado el proceso D-Bus `upowerd`, Phosh (`battery-manager.c` / `PhoshBatteryManager`) perdía la conexión y no se reconectaba, entrando en fallback visual: icono rojo `battery-missing-symbolic` y porcentaje estático en `0%`.
 3. **Fluctuación de porcentaje bajo carga de CPU**:
    - Cuando la CPU/GPU consume corriente pico, la resistencia interna de la celda ($R_{bat} \approx 85\text{ m}\Omega$) provoca una caída de tensión resistiva ($I \cdot R$). Si se lee el voltaje directo, el porcentaje parece descender bruscamente y luego subir.
 
 ---
 
-## 3. Solución Implementada
+## 3. Solución Implementada (Daemon v4)
 - **Compensación IR en Tiempo Real**:
   $$V_{OCV} = V_{bat} - (I_{bat} \cdot R_{int})$$
 - **Tabla OCV Calibrada para 7500mAh**:
   Curva de descarga no lineal de 100 puntos enlazada a voltajes entre 4.37V (100%) y 3.00V (1%).
 - **Filtro Exponencial IIR**:
   Suavizado $\alpha = 0.2$ para evitar saltos bruscos.
-- **Detección Tri-fuente de Carga**:
-  Combina corriente positiva entrante ($I > 20\text{ mA}$), flag de online de MT6375 y estado de carga.
-- **Emulación de Status mediante Bind Mount**:
-  Se monta un archivo temporal con `mount --bind /tmp/battery_fake_status /sys/class/power_supply/battery/status`. Esto engaña de manera limpia y sin tocar código de kernel a UPower y GNOME/Phosh, encendiendo el rayo de carga instantáneamente.
+- **Detección Tri-fuente de Carga con Debounce**:
+  Combina corriente positiva entrante ($I > 30\text{ mA}$), flag de online de MT6375 y estado de carga filtrado por 2 ciclos estables.
+- **Emulación de Status mediante Bind Mount Persistente**:
+  Se monta un archivo temporal con `mount --bind /tmp/battery_fake_status /sys/class/power_supply/battery/status` tanto en `/` como en `/sysroot`. No se desmonta agresivamente, sino que se reescribe su contenido atómicamente.
+- **Notificación Atómica a UPower sin Matar el Proceso**:
+  En lugar de `killall upowerd`, se sintetizan eventos `change` en `/sys/class/power_supply/battery/uevent` y se invoca el método oficial D-Bus `org.freedesktop.UPower.Device.Refresh` vía `busctl`. Esto actualiza Phosh en milisegundos sin cortar la sesión gráfica.
 - **Feedback Auditivo**:
   Emisión de sonidos `power-plug.ogg` y `power-unplug.ogg` por PipeWire.
 

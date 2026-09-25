@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# Monitor Inteligente de Batería y Cargador - UMIDIGI G7 Tab Pro (MT6789)
+# Monitor Inteligente de Batería y Cargadores - UMIDIGI G7 Tab Pro (MT6789)
 # postmarketOS Edge (Kernel 5.10.185-pmos aarch64)
 # ==============================================================================
 import time
@@ -9,14 +9,22 @@ import subprocess
 
 PATH_VOLTAGE     = "/sys/class/power_supply/battery/voltage_now"
 PATH_RAW_CURRENT = "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/FG_Battery_CurrentConsumption"
-PATH_ONLINE_CHG  = "/sys/class/power_supply/11017000.i2c:mt6375@34:chg/online"
-PATH_STATUS_CHG  = "/sys/class/power_supply/11017000.i2c:mt6375@34:chg/status"
+PATH_ONLINE_CHG  = "/sys/devices/platform/soc/11017000.i2c/i2c-5/5-0034/11017000.i2c:mt6375@34:chg/power_supply/11017000.i2c:mt6375@34:chg/online"
+PATH_STATUS_CHG  = "/sys/devices/platform/soc/11017000.i2c/i2c-5/5-0034/11017000.i2c:mt6375@34:chg/power_supply/11017000.i2c:mt6375@34:chg/status"
 PATH_INIT        = "/sys/class/power_supply/battery/init_done"
 PATH_UI_SOC      = "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/UI_SOC"
-PATH_STATUS_BAT  = "/sys/class/power_supply/battery/status"
-PATH_STATUS_BAT_SYSROOT = "/sysroot/sys/class/power_supply/battery/status"
 
-FAKE_STATUS_FILE = "/tmp/battery_fake_status"
+PATH_STATUS_BAT  = "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/power_supply/battery/status"
+PATH_CURR_BAT    = "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/power_supply/battery/current_now"
+PATH_MST_CHG     = "/sys/class/power_supply/mtk-master-charger/online"
+PATH_SLV_CHG     = "/sys/class/power_supply/mtk-slave-charger/online"
+
+PATH_IN_LIMIT    = "/sys/class/power_supply/11017000.i2c:mt6375@34:chg/input_current_limit"
+PATH_CHG_LIMIT   = "/sys/class/power_supply/11017000.i2c:mt6375@34:chg/constant_charge_current"
+
+FAKE_STATUS_FILE  = "/tmp/battery_fake_status"
+FAKE_CURRENT_FILE = "/tmp/battery_fake_current"
+FAKE_CHG_FILE     = "/tmp/battery_fake_chg"
 
 SOUND_PLUG   = "/usr/share/sounds/oxygen/stereo/power-plug.ogg"
 SOUND_UNPLUG = "/usr/share/sounds/oxygen/stereo/power-unplug.ogg"
@@ -66,6 +74,10 @@ def write_file(path, val):
     except:
         pass
 
+def ensure_charger_limits():
+    write_file(PATH_IN_LIMIT, 2000)
+    write_file(PATH_CHG_LIMIT, 2000)
+
 def calc_soc(vbat_uv, ibat_ua):
     vbat_mv = vbat_uv / 1000.0
     ibat_ma = ibat_ua / 1000.0
@@ -88,31 +100,109 @@ def calc_soc(vbat_uv, ibat_ua):
 
 def play_sound(snd_path):
     cmd = f"XDG_RUNTIME_DIR=/tmp/runtime-danilo pw-play {snd_path} >/dev/null 2>&1"
-    subprocess.Popen(["su", "-", "danilo", "-c", cmd])
+    subprocess.Popen(["su", "danilo", "-c", cmd])
+
+def bind_mount_if_needed(target, source):
+    try:
+        mounts = open("/proc/mounts").read()
+        real_target = os.path.realpath(target)
+        if real_target not in mounts and target not in mounts:
+            subprocess.call(["mount", "--bind", source, target], stderr=subprocess.DEVNULL)
+    except:
+        pass
+
+def setup_bind_mounts():
+    if not os.path.exists(FAKE_STATUS_FILE):
+        write_file(FAKE_STATUS_FILE, "Discharging")
+    if not os.path.exists(FAKE_CURRENT_FILE):
+        write_file(FAKE_CURRENT_FILE, "-500000")
+    if not os.path.exists(FAKE_CHG_FILE):
+        write_file(FAKE_CHG_FILE, "0")
+
+    targets = [
+        PATH_STATUS_BAT,
+        "/sysroot" + PATH_STATUS_BAT if os.path.exists("/sysroot" + PATH_STATUS_BAT) else None,
+        "/sys/class/power_supply/battery/status",
+        "/sysroot/sys/class/power_supply/battery/status" if os.path.exists("/sysroot/sys/class/power_supply/battery/status") else None
+    ]
+    for t in targets:
+        if t and os.path.exists(t):
+            bind_mount_if_needed(t, FAKE_STATUS_FILE)
+
+    curr_targets = [
+        PATH_CURR_BAT,
+        "/sysroot" + PATH_CURR_BAT if os.path.exists("/sysroot" + PATH_CURR_BAT) else None,
+        "/sys/class/power_supply/battery/current_now",
+        "/sysroot/sys/class/power_supply/battery/current_now" if os.path.exists("/sysroot/sys/class/power_supply/battery/current_now") else None
+    ]
+    for ct in curr_targets:
+        if ct and os.path.exists(ct):
+            bind_mount_if_needed(ct, FAKE_CURRENT_FILE)
+
+    if os.path.exists(PATH_MST_CHG):
+        bind_mount_if_needed(PATH_MST_CHG, FAKE_CHG_FILE)
+    if os.path.exists(PATH_SLV_CHG):
+        bind_mount_if_needed(PATH_SLV_CHG, FAKE_CHG_FILE)
+
+def ensure_upowerd_running():
+    # Verifica que upowerd esté vivo; si no, lo arranca
+    res = subprocess.call(["pgrep", "-x", "upowerd"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if res != 0:
+        for p in ["/usr/libexec/upowerd", "/usr/lib/upower/upowerd"]:
+            if os.path.exists(p):
+                subprocess.Popen([p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                break
+
+def notify_upower():
+    # 1. Notificar a udev mediante sintetización de uevent
+    uevent_paths = [
+        "/sys/class/power_supply/battery/uevent",
+        "/sysroot/sys/class/power_supply/battery/uevent",
+        "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/power_supply/battery/uevent"
+    ]
+    for up in uevent_paths:
+        if os.path.exists(up):
+            write_file(up, "change")
+
+    # 2. Llamada directa por D-Bus a Refresh() en UPower
+    # Forzar actualización inmediata en UPower y Phosh sin reiniciar ningún proceso
+    busctl_cmd = [
+        "busctl", "call", "org.freedesktop.UPower",
+        "/org/freedesktop/UPower/devices/battery_battery",
+        "org.freedesktop.UPower.Device", "Refresh"
+    ]
+    subprocess.call(busctl_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def set_charging_state(charging):
-    status_str = "Charging" if charging else "Discharging"
-    write_file(FAKE_STATUS_FILE, status_str)
-    
-    subprocess.call(["umount", PATH_STATUS_BAT], stderr=subprocess.DEVNULL)
-    subprocess.call(["umount", PATH_STATUS_BAT_SYSROOT], stderr=subprocess.DEVNULL)
-    
+    setup_bind_mounts()
     if charging:
-        subprocess.call(["mount", "--bind", FAKE_STATUS_FILE, PATH_STATUS_BAT], stderr=subprocess.DEVNULL)
-        subprocess.call(["mount", "--bind", FAKE_STATUS_FILE, PATH_STATUS_BAT_SYSROOT], stderr=subprocess.DEVNULL)
+        write_file(FAKE_STATUS_FILE, "Charging")
+        write_file(FAKE_CURRENT_FILE, "1500000")
+        write_file(FAKE_CHG_FILE, "1")
         play_sound(SOUND_PLUG)
-        print("[BatteryDaemon] Cargador CONECTADO -> Sonido emitido, icono de rayo activado.")
+        print("[BatteryDaemon] Cargador CONECTADO -> Sonido plug emitido, icono de rayo activado.")
     else:
+        write_file(FAKE_STATUS_FILE, "Discharging")
+        write_file(FAKE_CURRENT_FILE, "-500000")
+        write_file(FAKE_CHG_FILE, "0")
         play_sound(SOUND_UNPLUG)
-        print("[BatteryDaemon] Cargador DESCONECTADO -> Sonido emitido, icono normal.")
-        
-    subprocess.call(["killall", "upowerd"], stderr=subprocess.DEVNULL)
+        print("[BatteryDaemon] Cargador DESCONECTADO -> Sonido unplug emitido, icono normal.")
+
+    # Asegurar que upowerd esté activo y notificarle el cambio inmediatamente SIN matarlo
+    ensure_upowerd_running()
+    notify_upower()
 
 def main():
-    print(">> [BatteryDaemon] Monitor inteligente de Batería y Cargador iniciado.")
+    print(">> [BatteryDaemon v4] Monitor inteligente de Batería y Cargadores iniciado.")
     write_file(PATH_INIT, 1)
+    setup_bind_mounts()
+    ensure_upowerd_running()
     
     last_charging = None
+    debounce_candidate = None
+    debounce_count = 0
+    REQUIRED_STABLE_CYCLES = 2
+    
     last_soc = -1
     smoothed_soc = -1.0
     counter = 0
@@ -120,23 +210,26 @@ def main():
     while True:
         try:
             write_file(PATH_INIT, 1)
+            ensure_charger_limits()
             vbat = read_int(PATH_VOLTAGE, 0)
             raw_curr = read_int(PATH_RAW_CURRENT, 0)
             online = read_int(PATH_ONLINE_CHG, 0)
             chg_status = read_str(PATH_STATUS_CHG, "")
 
-            is_charging = (raw_curr > 20000) or (online > 0) or ("Charging" in chg_status)
+            raw_is_charging = (online > 0) or ("Charging" in chg_status) or (raw_curr > 30000)
 
-            if is_charging != last_charging:
-                if last_charging is not None:
-                    set_charging_state(is_charging)
-                else:
-                    if is_charging:
-                        write_file(FAKE_STATUS_FILE, "Charging")
-                        subprocess.call(["mount", "--bind", FAKE_STATUS_FILE, PATH_STATUS_BAT], stderr=subprocess.DEVNULL)
-                        subprocess.call(["mount", "--bind", FAKE_STATUS_FILE, PATH_STATUS_BAT_SYSROOT], stderr=subprocess.DEVNULL)
-                        subprocess.call(["killall", "upowerd"], stderr=subprocess.DEVNULL)
-                last_charging = is_charging
+            # Debounce para evitar falsos positivos
+            if raw_is_charging != debounce_candidate:
+                debounce_candidate = raw_is_charging
+                debounce_count = 1
+            else:
+                debounce_count += 1
+
+            if debounce_count >= REQUIRED_STABLE_CYCLES:
+                confirmed_charging = debounce_candidate
+                if confirmed_charging != last_charging:
+                    set_charging_state(confirmed_charging)
+                    last_charging = confirmed_charging
 
             if counter % 5 == 0 and vbat > 2500000:
                 raw_soc = calc_soc(vbat, raw_curr)
@@ -149,9 +242,10 @@ def main():
                 if soc != last_soc:
                     write_file(PATH_UI_SOC, soc)
                     last_soc = soc
-                    print(f"[BatteryDaemon] V={vbat//1000}mV I={raw_curr//1000}mA SOC={soc}% Charging={is_charging}")
+                    notify_upower()
+                    print(f"[BatteryDaemon] V={vbat//1000}mV I={raw_curr//1000}mA SOC={soc}% Charging={last_charging}")
         except Exception as e:
-            pass
+            print("[BatteryDaemon] Excepción en ciclo:", e)
 
         counter += 1
         time.sleep(1)

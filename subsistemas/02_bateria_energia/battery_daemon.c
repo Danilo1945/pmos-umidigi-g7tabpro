@@ -112,7 +112,8 @@ static void notify_charger_state(int charging) {
         mount(FAKE_CURRENT_FILE, "/sysroot/sys/class/power_supply/battery/current_now", NULL, MS_BIND, NULL);
 
         system("chroot /sysroot su - danilo -c 'XDG_RUNTIME_DIR=/tmp/runtime-danilo pw-play /usr/share/sounds/oxygen/stereo/power-plug.ogg' >/dev/null 2>&1 &");
-        system("killall upowerd 2>/dev/null");
+        system("echo change > /sys/class/power_supply/battery/uevent 2>/dev/null; echo change > /sysroot/sys/class/power_supply/battery/uevent 2>/dev/null");
+        system("busctl call org.freedesktop.UPower /org/freedesktop/UPower/devices/battery_battery org.freedesktop.UPower.Device Refresh >/dev/null 2>&1 || true");
         printf("[battery-daemon] Cargador CONECTADO -> Sonido emitido e icono de rayo activado.\n");
     } else {
         umount("/sys/class/power_supply/battery/status");
@@ -121,7 +122,8 @@ static void notify_charger_state(int charging) {
         umount("/sysroot/sys/class/power_supply/battery/current_now");
 
         system("chroot /sysroot su - danilo -c 'XDG_RUNTIME_DIR=/tmp/runtime-danilo pw-play /usr/share/sounds/oxygen/stereo/power-unplug.ogg' >/dev/null 2>&1 &");
-        system("killall upowerd 2>/dev/null");
+        system("echo change > /sys/class/power_supply/battery/uevent 2>/dev/null; echo change > /sysroot/sys/class/power_supply/battery/uevent 2>/dev/null");
+        system("busctl call org.freedesktop.UPower /org/freedesktop/UPower/devices/battery_battery org.freedesktop.UPower.Device Refresh >/dev/null 2>&1 || true");
         printf("[battery-daemon] Cargador DESCONECTADO -> Sonido emitido e icono restaurado.\n");
     }
     fflush(stdout);
