@@ -69,7 +69,7 @@
 | Subsistema | Componente | Estado | Versión / Commit | Notas |
 | :--- | :--- | :---: | :---: | :--- |
 | **01. Audio** | MT6789 AFE + 4x AW87359 | 🟢 **100% OK** | `v1.0-estable` | Ganancias: 32768 (0 dB), Headset: 12 (+2 dB). PipeWire: S16LE, 48kHz, disable-mmap, period-size 6000. Sonido limpio, nítido y sin siseo. |
-| **02. Batería** | PMIC MT6366 + MT6375 | 🟢 **100% OK** | `v1.0-estable` | Algoritmo OCV para celda 7500mAh con compensación IR ($85\text{ m}\Omega$). Bind mount dinámico de carga en sysfs con audio feedback. |
+| **02. Batería** | PMIC MT6366 + MT6375 | 🟢 **100% OK** | `v1.0-estable` | Algoritmo OCV 7500mAh ($R_{int}=85\text{ m}\Omega$), Daemon v4 sin killall upowerd. Notificación D-Bus Refresh y uevent. Rayo de carga y porcentaje en tiempo real en Phosh. |
 | **03. Pantalla/Touch**| MIPI-DSI + TDDI Chipone | 🟢 **100% OK** | `v1.0-estable` | Bypass de sesión `libseat_direct.so` inyectado en Phoc. Orientación invertida 180° aplicada sin latencia. Touch fluido. |
 | **04. Wi-Fi** | MediaTek MT6631 / WMT | 🟢 **100% OK** | `v1.0-estable` | Bus WMT inicializado por `wmt_init_complete.c`. Interfaz `wlan0` administrada por NetworkManager. |
 | **05. Arranque** | Boot v4 + WDT Petter | 🟢 **100% OK** | `v1.0-estable` | Kernel 5.10.185-pmos estable sin reinicio de 30s gracias a `wdt_pet`. Red USB gadget fija en `172.16.42.1`. |
@@ -102,6 +102,15 @@
   2. Ajuste de buffer DMA en PipeWire a S16LE / 48kHz / disable-mmap / period-size 6000. Reemplazo de reproductor inestable por Amberol. Audio 100% claro y validado por el usuario.
   3. Creación del repositorio `FUNCIONALIDADES_FINALES`, compilador `build_all.sh`, herramienta 1-click `restore_live_tablet.py`, manuales técnicos y etiquetado Git `v1.0-estable`.
   4. Diagnóstico del brillo: resolución de discrepancia entre `/sys/class/leds` y `/sys/class/backlight` para restablecer el slider de Phosh.
+
+### Sesión 6: Solución Definitiva de Batería en Phosh (Daemon v4 sin killall upowerd)
+- **Hito**: Resolución del fallo donde el icono de batería se quedaba en rojo con 0% al conectar/desconectar el cargador.
+- **Causa Raíz Identificada**: Phosh (`PhoshBatteryManager` / `battery-manager.c`) se conecta por D-Bus a `upowerd` una sola vez. Las versiones anteriores ejecutaban `killall upowerd` al cambiar de estado, rompiendo irreversiblemente el enlace D-Bus de Phosh y forzándolo a mostrar su fallback (`battery-missing-symbolic` en rojo y `0%`).
+- **Solución de Ingeniería**:
+  1. Se eliminó por completo `killall upowerd` de `tablet_battery_daemon.py` y `battery_daemon.c`.
+  2. Se implementó la actualización atómica mediante sintetización de `change` en `/sys/class/power_supply/battery/uevent` y la invocación directa al método D-Bus `org.freedesktop.UPower.Device.Refresh` vía `busctl`.
+  3. Los bind mounts sobre sysfs se mantienen persistentes sin desmontajes agresivos.
+  4. Resultado en vivo: icono con rayo de carga y porcentaje exacto (p. ej. 33%) visible y fluido en Phosh, feedback acústico funcional y estabilidad absoluta validada por el usuario.
 
 ---
 

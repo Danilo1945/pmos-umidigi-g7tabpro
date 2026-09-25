@@ -277,7 +277,7 @@ python3 tools/restore_live_tablet.py
 | Subsistema | Módulo Kernel Principal | Archivo Fuente / Config | Destino en la Tablet | Estado |
 | :--- | :--- | :--- | :--- | :--- |
 | **Audio** | `snd_soc_mt6789_afe`, `snd_soc_aw87xxx` | `tablet_audio_daemon.py`, `10-alsa.conf` | `/usr/local/bin/`, `/etc/pipewire/pipewire.conf.d/` | ✅ Estable (0 dB, sin siseo) |
-| **Batería** | `mt6358_battery`, `mt6375_charger` | `tablet_battery_daemon.py`, `battery_daemon.c` | `/usr/bin/tablet_battery_daemon.py`, `/sysfs` bind | ✅ Estable (OCV + Rayo de carga) |
+| **Batería** | `mt6358_battery`, `mt6375_charger` | `tablet_battery_daemon.py`, `battery_daemon.c` | `/usr/bin/tablet_battery_daemon.py`, `/sysfs` bind | ✅ Estable (Daemon v4 OCV + Rayo + D-Bus Refresh, sin killall upowerd) |
 | **Pantalla / Touch** | `mediatek_drm`, `tddi_9551` | `libseat_direct.c`, `phoc.ini`, `start_phosh.sh` | `/usr/lib/libseat_direct.so`, `/etc/phoc.ini` | ✅ Estable (Wayland GLES2 180°) |
 | **Wi-Fi** | `wmt_drv`, `wlan_drv_gen4m_6789` | `wmt_init_complete.c`, `wmt_wifi_start.sh` | `/usr/bin/wmt_init_complete`, `/dev/wmtWifi` | ✅ Estable (`wlan0` activo) |
 | **Kernel / Boot** | `musb_hdrc`, `mtk_wdt` | `wdt_pet.c`, `pmos_usb_peripheral.dtb` | `boot_a`, `vendor_boot_a` | ✅ Estable (Sin reboot de 30s) |

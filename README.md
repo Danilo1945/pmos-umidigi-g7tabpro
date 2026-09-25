@@ -122,7 +122,7 @@ python3 build_pmos_boot_v13.py
 | Subsistema | Componente Clave | Estado | Verificación Técnica |
 | :--- | :--- | :--- | :--- |
 | **Audio** | ALSA MT6789 AFE + 4x AW87359 | ✅ **100% Funcional** | Sonido nítido, buen volumen, sin siseo ni distorsión (ganancias calibradas a 32768 y 12, I2S3 off, DMA S16LE en PipeWire). |
-| **Batería** | PMIC MT6366 + MT6375 chg | ✅ **100% Funcional** | Curva OCV no lineal 7500mAh con compensación IR $85\text{ m}\Omega$, rayo de carga en Phosh por bind mount y sonidos de conexión. |
+| **Batería** | PMIC MT6366 + MT6375 chg | ✅ **100% Funcional** | Curva OCV 7500mAh ($R_{int}=85\text{ m}\Omega$), Daemon v4 con bind mount persistente, notificación D-Bus Refresh y uevent sin matar upowerd, rayo de carga y porcentaje real en Phosh. |
 | **Pantalla** | MIPI-DSI 1200x1920 + TDDI | ✅ **100% Funcional** | Sesión GNOME/Phosh acelerada levantada con bypass `libseat_direct.so`, rotación 180° y touch fluido. |
 | **Wi-Fi** | MediaTek MT6631 / WMT | ✅ **100% Funcional** | Interfaz `wlan0` activa, gestionada por NetworkManager con registro udev dinámico. |
 | **Kernel / Boot**| Boot v4 + musb Gadget + WDT | ✅ **100% Funcional** | Kernel 5.10.185-pmos arranca de manera estable sin reboot a los 30s gracias a `wdt_pet`. Red USB fija `172.16.42.1`. |
