@@ -13,6 +13,7 @@ insmod /lib/modules/pd_dbg_info.ko 2>/dev/null || insmod $MODDIR/pd_dbg_info.ko 
 insmod /lib/modules/tcpc_class.ko 2>/dev/null || insmod $MODDIR/tcpc_class.ko 2>/dev/null || true
 insmod /lib/modules/mtk_chg_type_det.ko 2>/dev/null || insmod $MODDIR/mtk_chg_type_det.ko 2>/dev/null || true
 insmod /lib/modules/mt6358_battery.ko 2>/dev/null || insmod $MODDIR/mt6358_battery.ko 2>/dev/null || true
+udevadm trigger --subsystem-match=platform 2>/dev/null || true
 
 # Iniciar monitor de batería (preferir tablet_battery_daemon.py con audio, bind mount y OCV)
 if ! pgrep -f tablet_battery_daemon.py >/dev/null; then
@@ -59,12 +60,18 @@ for numid in 282 279 276 273; do
     amixer -c 0 cset numid=$numid 0 2>/dev/null || true
 done
 
-# 3. Cargar Módulos de GPU ARM Mali-G57 MC2
-for m in mcupm fhctl nvmem_mtk-devinfo mtk_qos mtk-ssc gpueb mtk_bp_thl \
-         mtk_battery_oc_throttling mtk_gpu_hal mtk_gpufreq_wrapper mtk_gpufreq_mt6789 \
-         mtk_gpu_qos ged mali_kbase_mt6789; do
+# 3. Cargar Módulos de GPU ARM Mali-G57 MC2 (Cadena de Dependencias Topológica)
+for m in tinysys-scmi mrdump pmic_lbat_service mtk_low_battery_throttling \
+         mtk_dynamic_loading_throttling mtk_mdpm mtk_pbm mtk_bp_thl mtk_battery_oc_throttling \
+         mtk-mbox mtk_rpmsg_mbox mtk_tinysys_ipi aee_aed mtk-ssc gpueb mtk_gpufreq_wrapper \
+         mtk_dramc emi-mpu emi mtk-icc-core mmprofile mtk-smi mtk-smi-dbg mtk-mmdvfs \
+         mtk-mmdvfs-debug mmqos-common sspm_v3 mtk_qos mtk_gpu_qos system_heap clkbuf \
+         leds-mtk mtk_slbc iommu_secure iommu_debug mtk_panel_ext mtk_disp_notify mtk_sync \
+         clk-common irq-dbg vcp_status device-apc-common mtk-cmdq-drv-ext mtk-mml \
+         cmdq_helper_inf mediatek-drm mtk_gpu_hal ged mali_kbase_mt6789; do
     insmod /lib/modules/$m.ko 2>/dev/null || insmod $MODDIR/$m.ko 2>/dev/null || true
 done
+modprobe mali_kbase_mt6789 2>/dev/null || true
 mknod /dev/mali0 c 10 116 2>/dev/null || true
 mknod /sysroot/dev/mali0 c 10 116 2>/dev/null || true
 chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
@@ -162,15 +169,17 @@ udevadm trigger --subsystem-match=backlight 2>/dev/null || true
 # Brillo al 100% inicial
 echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
-# 6. Supervisor perpetuo de Phoc + Phosh con GLES2 y aceleración
+# 6. Supervisor perpetuo de Phoc + Phosh con GLES2 y aceleración por hardware
 export WLR_BACKENDS=drm,libinput
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_RENDERER=pixman
 export WLR_RENDERER_ALLOW_SOFTWARE=1
 export LP_NUM_THREADS=8
+export GSK_RENDERER=gl
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
+export QT_QUICK_BACKEND=gl
 export SDL_VIDEODRIVER=wayland
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh

@@ -103,7 +103,11 @@ def main():
     disp_dir = os.path.join(ROOT_DIR, "subsistemas", "03_pantalla_rotacion_touch")
     send_file_content(os.path.join(disp_dir, "phoc.ini"), "/etc/phoc.ini")
     send_file_content(os.path.join(disp_dir, "start_phosh.sh"), "/usr/bin/start_phosh.sh")
+    send_file_content(os.path.join(disp_dir, "start_phosh.sh"), "/bin/start_phosh.sh")
     send_file_content(os.path.join(disp_dir, "start_phosh.sh"), "/sysroot/usr/bin/start_phosh.sh")
+    if os.path.exists(os.path.join(disp_dir, "gpu_acceleration.sh")):
+        send_file_content(os.path.join(disp_dir, "gpu_acceleration.sh"), "/etc/profile.d/gpu_acceleration.sh")
+        send_file_content(os.path.join(disp_dir, "gpu_acceleration.sh"), "/sysroot/etc/profile.d/gpu_acceleration.sh")
     
     # 5. Restaurar Subsistema de Wi-Fi
     print("\n--- [4/4] Restaurando Wi-Fi WMT ---")
