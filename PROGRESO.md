@@ -74,11 +74,20 @@
 | **04. Wi-Fi** | MediaTek MT6631 / WMT | 🟢 **100% OK** | `v1.0-estable` | Bus WMT inicializado por `wmt_init_complete.c`. Interfaz `wlan0` administrada por NetworkManager. |
 | **05. Arranque** | Boot v4 + WDT Petter | 🟢 **100% OK** | `v1.0-estable` | Kernel 5.10.185-pmos estable sin reinicio de 30s gracias a `wdt_pet`. Red USB gadget fija en `172.16.42.1`. |
 | **06. Brillo Pantalla**| `lcd-backlight` (PWM) | 🟡 **En Integración**| `v1.0-estable` | Hardware responde (0..255). Se montó `/sys/class/backlight` virtual para que el slider de Phosh lo controle. |
-| **07. GPU / Aceleración**| ARM Mali-G57 MC2 | 🟡 **Prioridad Próxima**| - | Actualmente corre con renderizado CPU (`pixman`). Requiere aceleración global GLES2 para eliminar lag en apps y YouTube. |
+| **07. GPU / Aceleración**| ARM Mali-G57 MC2 | 🟡 **Silicio OK / En Enlace DRM**| `feature-gpu-hardware-acceleration` | Silicio activado en `/dev/mali0` (Valhall v9 JM r32p1). Perfil `/etc/profile.d/gpu_acceleration.sh` activo. Mesa 26.1 `panfrost_dri.so` listo, en espera de exposición del nodo DRM `renderD128`. |
 
 ---
 
 ## 📜 HISTORIAL DE SESIONES Y HITOS COMPLETADOS
+
+### Sesión 7: Silicio GPU Mali-G57 Activado y Diagnóstico de Mesa Panfrost vs kbase
+- **Hito**: Activación en caliente y permanente de los núcleos físicos de la GPU ARM Mali-G57 MC2 en el kernel y perfil global de aceleración.
+- **Logros Técnicos de Silicio**:
+  1. Resolución de la cadena topológica completa de dependencias de MediaTek (`tinysys_scmi`, `sspm_v3`, `mtk_gpu_qos`, `ged`, `mali_kbase_mt6789`).
+  2. Inicialización comprobada en dmesg: `mali 13000000.mali: GPU identified as 0x3 arch 9.0.9 r0p1 status 0 (Valhall v9 JM)`.
+  3. Creación y asignación de permisos a `/dev/mali0`.
+  4. Creación del perfil `/etc/profile.d/gpu_acceleration.sh` para aceleración nativa Wayland, GTK4 (`GSK_RENDERER=gl`), Qt y Firefox WebRender en todas las aplicaciones.
+  5. Diagnóstico de arquitectura gráfica: Mesa upstream Panfrost (`panfrost_dri.so`) requiere un nodo render DRM (`/dev/dri/renderD128` provisto por `panfrost.ko` con soporte `arm,mali-valhall-jm`). El hardware responde, la interfaz Phosh corre fluida a 1200x1920 con batería al 29% en vivo, y se trazó la ruta hacia el módulo `panfrost` de Linux 6.0+.
 
 ### Sesión 1: Núcleo de Arranque y Control de Watchdog
 - **Hito**: Arranque funcional de postmarketOS Edge en arquitectura A/B Android v4.
