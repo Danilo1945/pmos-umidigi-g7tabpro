@@ -161,8 +161,8 @@ mount --bind /tmp/fake_backlight /sys/class/backlight 2>/dev/null || true
 mount --bind /tmp/fake_backlight /sysroot/sys/class/backlight 2>/dev/null || true
 udevadm trigger --subsystem-match=backlight 2>/dev/null || true
 
-# Brillo al 100% inicial
-echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+# Brillo inicial calibrado al 27% (70/255) para eficiencia energetica
+echo 70 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
 # 6. Supervisor perpetuo de Phoc + Phosh con GLES2 y aceleración por hardware
 export WLR_BACKENDS=drm,libinput
