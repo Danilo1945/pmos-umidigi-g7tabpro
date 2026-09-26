@@ -520,13 +520,13 @@ fi
         shutil.copy2(pw_conf_src, os.path.join(workdir, "etc", "pipewire", "10-alsa.conf"))
         print(f"  [+] 10-alsa.conf (PipeWire S16LE/48kHz/disable-mmap) instalado en initramfs")
 
-    # start_plasma_mobile.sh
-    spm_bin_src = "/home/danilo/Documentos/TABLET/start_plasma_mobile.sh"
-    if os.path.exists(spm_bin_src):
-        spm_bin_dst = os.path.join(workdir, "bin", "start_plasma_mobile.sh")
-        shutil.copy2(spm_bin_src, spm_bin_dst)
-        os.chmod(spm_bin_dst, 0o755)
-        print(f"  [+] start_plasma_mobile.sh instalado en {spm_bin_dst}")
+    # start_phosh_service.sh (Servicio de Phosh Wayland y GPU Mali)
+    phosh_service_src = "/home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/subsistemas/03_pantalla_rotacion_touch/start_phosh_service.sh"
+    if os.path.exists(phosh_service_src):
+        phosh_service_dst = os.path.join(workdir, "bin", "start_phosh_service.sh")
+        shutil.copy2(phosh_service_src, phosh_service_dst)
+        os.chmod(phosh_service_dst, 0o755)
+        print(f"  [+] start_phosh_service.sh instalado en {phosh_service_dst}")
 
     # Neutralizaciones para evitar que pmOS desmonte el USB Gadget o aborte
     for fn_file in ["init_functions.sh", "init_functions_2nd.sh", "usr/share/initramfs/init_functions.sh"]:
@@ -638,8 +638,8 @@ WantedBy=sysinit.target
 EOF_WDT
 ln -sf /etc/systemd/system/wdt-pet.service /sysroot/etc/systemd/system/sysinit.target.wants/wdt-pet.service 2>/dev/null || true
 
-# 4. Asegurar encendido del Backlight al 100%
-echo 255 > /sysroot/sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+# 4. Asegurar Backlight apagado (0) para máxima velocidad de recarga y ahorro
+echo 0 > /sysroot/sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
 # 5. Shell Root Directo en Consola Serie (/dev/ttyGS0 -> /dev/ttyACM0 en PC)
 mkdir -p /sysroot/etc/systemd/system/multi-user.target.wants 2>/dev/null || true
@@ -812,10 +812,10 @@ for w in $(seq 1 120); do
     if [ -c /dev/dri/card0 ]; then
         echo "🎉 ¡DRM /dev/dri/card0 CREADO CON ÉXITO!"
         ls -la /dev/dri/
-        echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-        echo 2047 > /sys/class/backlight/*/brightness 2>/dev/null || true
+        echo 0 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+        echo 0 > /sys/class/backlight/*/brightness 2>/dev/null || true
         mkdir -p /sys/class/backlight 2>/dev/null || true
-        echo "[+] Subsistema DRM /dev/dri/card0 inicializado y backlight al 100%"
+        echo "[+] Subsistema DRM /dev/dri/card0 inicializado y backlight en 0 (ahorro total)"
         exit 0
     fi
     sleep 0.5
@@ -1210,9 +1210,9 @@ if [ -f /sys/class/drm/card0/dev ]; then
     cp -a /dev/dri/* /sysroot/dev/dri/ 2>/dev/null || true
 fi
 
-# Encender backlight al 100%
+# Apagar backlight (0) para maxima velocidad de carga de bateria
 for b in /sys/class/leds/lcd-backlight/brightness /sys/class/backlight/*/brightness; do
-    [ -f "$b" ] && echo 255 > "$b" 2>/dev/null || true
+    [ -f "$b" ] && echo 0 > "$b" 2>/dev/null || true
 done
 
 # Preconfigurar KWin Output para panel DSI-1 nativo (1200x1920)
@@ -1379,7 +1379,10 @@ DBUSEOF
         # Precalentar udev en sysroot
         chroot /sysroot udevadm trigger --action=add --subsystem-match=input 2>/dev/null || true
         chroot /sysroot udevadm settle --timeout=2 2>/dev/null || true
-        echo ">> [pmOS-v13] Entorno sysroot listo. Esperando inicio de sesion UI interactivo..." > /dev/kmsg
+        echo ">> [pmOS-v13] Entorno sysroot listo. Levantando sesión UI interactiva Phosh..." > /dev/kmsg
+        if [ -x /bin/start_phosh_service.sh ]; then
+            /bin/start_phosh_service.sh
+        fi
     ) &
 fi
 

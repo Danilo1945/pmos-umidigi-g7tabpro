@@ -149,32 +149,23 @@ rotate=180
 PHOCEOF
 
 
-# Configurar emulación de subsistema /sys/class/backlight para Phosh y GNOME
-mkdir -p /tmp/fake_backlight/lcd-backlight
-ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/brightness 2>/dev/null || true
-ln -sf /sys/class/leds/lcd-backlight/brightness /tmp/fake_backlight/lcd-backlight/actual_brightness 2>/dev/null || true
-ln -sf /sys/class/leds/lcd-backlight/max_brightness /tmp/fake_backlight/lcd-backlight/max_brightness 2>/dev/null || true
-echo raw > /tmp/fake_backlight/lcd-backlight/type 2>/dev/null || true
-chmod -R 777 /tmp/fake_backlight 2>/dev/null || true
+# Control de brillo: permisos y nivel óptimo (70% - 180/255)
 chmod 666 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-mount --bind /tmp/fake_backlight /sys/class/backlight 2>/dev/null || true
-mount --bind /tmp/fake_backlight /sysroot/sys/class/backlight 2>/dev/null || true
-udevadm trigger --subsystem-match=backlight 2>/dev/null || true
+echo 180 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
-# Brillo inicial calibrado al 27% (70/255) para eficiencia energetica
-echo 70 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+# Asegurar SHM en el chroot
+mkdir -p /dev/shm
+mount -t tmpfs none /dev/shm 2>/dev/null || true
+chmod 1777 /dev/shm 2>/dev/null || true
 
-# 6. Supervisor perpetuo de Phoc + Phosh con GLES2 y aceleración por hardware
 export WLR_BACKENDS=drm,libinput
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_RENDERER=pixman
 export WLR_RENDERER_ALLOW_SOFTWARE=1
 export LP_NUM_THREADS=8
-export GSK_RENDERER=gl
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
-export QT_QUICK_BACKEND=gl
 export SDL_VIDEODRIVER=wayland
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
@@ -186,8 +177,8 @@ export MOZ_ENABLE_WAYLAND=1
 
 while true; do
     rm -f $XDG_RUNTIME_DIR/wayland-*
-    echo "[+] Levantando Phoc + Phosh -U (GNOME GLES2)..."
-    LD_PRELOAD=/usr/lib/libseat_direct.so phoc -C /etc/phoc.ini -E "/usr/libexec/phosh -U" > /var/log/phosh_session.log 2>&1
+    echo "[+] Levantando Phoc + Phosh -U con dbus-run-session..."
+    LD_PRELOAD=/usr/lib/libseat_direct.so dbus-run-session -- phoc -C /etc/phoc.ini -E "/usr/libexec/phosh -U" > /var/log/phosh_session.log 2>&1
     echo "[-] Phoc finalizo. Reiniciando en 3 segundos..."
     sleep 3
 done
