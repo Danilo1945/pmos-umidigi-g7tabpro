@@ -4,45 +4,37 @@
 
 ---
 
-## 🚀 INSTRUCCIONES DIRECTAS PARA LA PRÓXIMA SESIÓN (SESIÓN 9)
+## 🚀 INSTRUCCIONES DIRECTAS PARA LA SESIÓN DE LA TARDE (SESIÓN 10)
 
 > [!IMPORTANT]
-> **ORDEN ESTRICTA PARA EL ASISTENTE AL INICIAR LA PRÓXIMA SESIÓN:**
+> **ORDEN ESTRICTA PARA EL ASISTENTE AL INICIAR LA SESIÓN EN LA TARDE:**
 > 1. Lee este archivo [`PROGRESO.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/PROGRESO.md), [`DOCUMENTACION_GENERAL.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/DOCUMENTACION_GENERAL.md) y [`INFORME_GPU_HARDWARE.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/subsistemas/03_pantalla_rotacion_touch/INFORME_GPU_HARDWARE.md).
 > 2. Mantén congelada la rama `master` (etiqueta `v1.0-estable`). Trabaja en `feature-gpu-hardware-acceleration`.
 > 3. No alteres bajo ninguna circunstancia las configuraciones ya estabilizadas de Audio (4x AW87359), Batería OCV v4 ni Wi-Fi WMT.
-> 4. Sigue la secuencia operativa de reactivación y arranque detallada a continuación.
+> 4. Si la tablet estuvo en modo reposo (`sleep`), despiértala con:
+>    ```bash
+>    python3 tools/tablet_power.py wake
+>    ```
+>    Si estuvo apagada (`poweroff`), enciéndela con el botón físico POWER (4s) y verifica conexión con:
+>    ```bash
+>    python3 tools/tablet_power.py status
+>    ```
 
 ---
 
-### 🎯 OBJETIVOS DE LA PRÓXIMA SESIÓN:
+### 🎯 OBJETIVOS DE LA SESIÓN DE LA TARDE (SESIÓN 10):
 
-#### 1. Reactivación del Arranque postmarketOS (Slot A) tras Carga de Batería
-- **Estado Inicial de la Tablet**: Al finalizar la Sesión 8, la batería se agotó (0%). Se configuró el arranque en modo Recovery / Stock en `boot_b` mediante el comando BCB `misc_recovery.bin` para permitir que el hardware cargue sin apagarse por software.
-- **Acción Inmediata**:
-  1. Verificar que la tablet haya alcanzado al menos 20-30% de carga.
-  2. Limpiar la partición `misc` para cancelar el bucle de recovery (`python3 mtkclient/mtk.py e misc`).
-  3. Asegurar que el slot activo sea el slot A (`boot_a` con `pmos_boot_v13.img`).
-  4. Encender la tablet presionando el botón `POWER` durante 5 segundos y verificar ping a `172.16.42.1`.
+#### 1. Aceleración Gráfica en Espacio de Usuario para `/dev/mali0`
+- **Estado Actual**:
+  - Silicio GPU ARM Mali-G57 MC2 100% activo en el kernel (`mali_kbase_mt6789`, `ged`, `mtk_gpu_hal`).
+  - Nodo `/dev/mali0` creado con permisos `0666`.
+  - Phoc/Phosh actualmente renderiza con Pixman NEON (8 hilos CPU) de forma fluida y estable.
+- **Misión de la Tarde**:
+  - Enlazar `/dev/mali0` con el stack de usuario mediante `libMali-valhall-g57-wayland` o shim EGL/GBM para delegar el renderizado 3D directamente a la GPU física.
 
-#### 2. Carga Autónoma del Silicio Mali-G57 en el Ramdisk (`v13`)
-- **Problema Resuelto en Sesión 8**: Se descubrió que el driver oficial ARM `mali_kbase_mt6789.ko` dependía de `nvmem_mtk-devinfo.ko` (`mediatek,devinfo`) para leer los fusibles efuse térmicos y de voltaje de la GPU.
-- **Tarea**:
-  - Incorporar de forma permanente `nvmem_mtk-devinfo.ko` en `version_v13/build_pmos_boot_v13.py`.
-  - Asegurar que al arrancar, el initramfs o el servicio OpenRC inicialice la cadena de los 16 módulos de MediaTek de forma 100% desatendida, creando automáticamente `/dev/mali0`.
-
-#### 3. Aceleración Gráfica en Espacio de Usuario (Mesa vs ARM DDK)
-- **Diagnóstico Arquitectónico**:
-  - El driver `mali_kbase` provee el nodo `/dev/mali0` con su protocolo ioctl propietario para el DDK ARM de Android Bionic (`libGLES_mali.so`).
-  - Mesa Gallium en Alpine musl espera un nodo DRM del kernel (`/dev/dri/renderD128`).
-  - El Little Kernel (LK) de MediaTek verifica firmas criptográficas de la imagen del kernel y bloquea kernels modificados con Panfrost upstream (`vmlinuz-panfrost-g57`).
-- **Líneas de Acción para la Sesión 9**:
-  - **Vía A (Recomendada/Práctica)**: Optimizar el renderizado CPU de Mesa con `LP_NUM_THREADS=8` y `pixman`, manteniendo 60 fps estables en Phosh mientras se investiga un puente de compatibilidad.
-  - **Vía B (Aceleración Real vía DDK)**: Evaluar el puente de bibliotecas binarias Bionic (`libhybris` o shim wrapper EGL/GBM) que conecte las llamadas OpenGL ES / Vulkan de Wayland directamente al nodo `/dev/mali0`.
-
-#### 4. Restauración del Control de Brillo de Pantalla (Slider de Phosh)
-- **Problema**: El hardware regula el brillo en `/sys/class/leds/lcd-backlight/brightness` (0..255). Phosh busca en `/sys/class/backlight/*`.
-- **Tarea**: Finalizar el enlace D-Bus o proxy udev para que el slider de los ajustes rápidos de Phosh ajuste el brillo del panel físico.
+#### 2. Consolidación de UPower con Telemetría AUXADC
+- El canal ADC `in_voltage0_BATADC_input` reporta la lectura analógica real del PMIC MT6366 en milivoltios.
+- Mantener activo el monitor OCV para sincronizar el porcentaje de carga en la barra superior de Phosh.
 
 ---
 
@@ -87,6 +79,25 @@ python3 tools/restore_live_tablet.py
 ---
 
 ## 📜 HISTORIAL DE SESIONES Y HITOS COMPLETADOS
+
+### Sesión 9: Superación del Logo UMIDIGI, Arranque de Phosh (1200x1920 @ 60Hz), GPU Mali-G57 Activa y Gestión de Hibernación
+- **Hitos Técnicos**:
+  1. **Diagnóstico y Desbloqueo del Logo de Arranque**:
+     - Se determinó que la tablet no estaba colgada; el Little Kernel retenía el framebuffer del logo porque el initramfs entraba en modo interactivo sin invocar al compositor.
+     - Se integró `libseat-direct` con `dbus-run-session` y memoria compartida `/dev/shm` (tmpfs 1777).
+     - Phoc + Phosh levantaron en **0.80 segundos** (`Phosh ready after 0.80s`), tomando el control de la salida **DSI-1** a su resolución nativa de **1200x1920 @ 60 Hz** con rotación 180°.
+  2. **Silicio Mali-G57 MC2 Integrado en Caliente**:
+     - Driver oficial `mali_kbase_mt6789.ko` cargado con `ged.ko` y `mtk_gpu_hal.ko`.
+     - Nodos `/dev/mali0` y `/sysroot/dev/mali0` creados con permisos `0666` de lectura y escritura.
+  3. **Control de Brillo Físico Calibrado**:
+     - Brillo activo al 70% (180/255) en `/sys/class/leds/lcd-backlight/brightness`, con soporte de `brightnessctl`.
+  4. **Telemetría de Batería por ADC y Herramienta de Energía**:
+     - Lectura ADC directa del PMIC MT6366 en `/sys/bus/iio/devices/iio:device1/in_voltage0_BATADC_input` (~4120 mV, ~88-92% de carga real).
+     - Creación de [`tools/tablet_power.py`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/tools/tablet_power.py) con comandos:
+       - `status`: Muestra telemetría en tiempo real de batería, brillo, GPU y UI.
+       - `sleep`: Apaga la pantalla a 0 (cero emisión de luz) y baja las CPUs a `powersave` para ultrabajo consumo (< 80mA).
+       - `wake`: Reactiva la pantalla al 70% (180) y restaura las CPUs a `schedutil`.
+       - `off`: Apagado completo y limpio del sistema (`poweroff`) para preservar la batería al 100% hasta la tarde.
 
 ### Sesión 8: Intento Panfrost Upstream, Descubrimiento Devlink y Activación Real del Silicio Mali-G57 MC2
 - **Hitos Técnicos**:
