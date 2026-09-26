@@ -4,63 +4,70 @@
 
 ---
 
-## 🚀 INSTRUCCIONES DIRECTAS PARA LA PRÓXIMA SESIÓN
+## 🚀 INSTRUCCIONES DIRECTAS PARA LA PRÓXIMA SESIÓN (SESIÓN 9)
 
 > [!IMPORTANT]
 > **ORDEN ESTRICTA PARA EL ASISTENTE AL INICIAR LA PRÓXIMA SESIÓN:**
-> 1. Lee este archivo [`PROGRESO.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/PROGRESO.md) y [`DOCUMENTACION_GENERAL.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/DOCUMENTACION_GENERAL.md).
-> 2. Mantén congelada la rama `master` (etiqueta `v1.0-estable`).
-> 3. No te vayas por las ramas ni toques configuraciones ya estabilizadas de Audio, Batería o Wi-Fi.
-> 4. Concéntrate **al 100% en los dos objetivos clave** descritos a continuación.
+> 1. Lee este archivo [`PROGRESO.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/PROGRESO.md), [`DOCUMENTACION_GENERAL.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/DOCUMENTACION_GENERAL.md) y [`INFORME_GPU_HARDWARE.md`](file:///home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/subsistemas/03_pantalla_rotacion_touch/INFORME_GPU_HARDWARE.md).
+> 2. Mantén congelada la rama `master` (etiqueta `v1.0-estable`). Trabaja en `feature-gpu-hardware-acceleration`.
+> 3. No alteres bajo ninguna circunstancia las configuraciones ya estabilizadas de Audio (4x AW87359), Batería OCV v4 ni Wi-Fi WMT.
+> 4. Sigue la secuencia operativa de reactivación y arranque detallada a continuación.
 
 ---
 
 ### 🎯 OBJETIVOS DE LA PRÓXIMA SESIÓN:
 
-#### 1. Aceleración Gráfica por HARDWARE REAL GPU (ESTRICTAMENTE PROHIBIDO RENDERIZADO POR CPU)
-> [!CAUTION]
-> **REGLA FUNDAMENTAL DE SILICIO:**
-> - **ESTRICTAMENTE PROHIBIDO** el renderizado por software en la CPU (`pixman`, `llvmpipe`, `softpipe`, `swrast`, etc.).
-> - **OBLIGATORIO HARDWARE REAL GPU:** Todo el pipeline gráfico debe ejecutarse físicamente en los núcleos de cómputo y sombreado de la **GPU ARM Mali-G57 MC2** (Arquitectura Valhall) a través de `/dev/mali0` y la controladora DRM.
-> - La CPU debe quedar liberada (consumo < 10-15%) y los frames deben ser procesados directamente por el silicio gráfico.
-- **Alcance**: La aceleración NO debe limitarse a una sola app. Debe ser **global a nivel de sistema**:
-  - **Compositor Wayland (`phoc` / wlroots)**: Reemplazar el renderizado por software (`WLR_RENDERER=pixman`) por el backend nativo acelerado GLES2/EGL (`mali` / `dri`).
-  - **Entorno de Escritorio Phosh / GNOME**: Asegurar aceleración por hardware en la interfaz de usuario, animaciones y panel superior.
-  - **Aplicaciones del Sistema (GTK4 / GTK3 / Qt)**: Habilitar el renderizado GPU directo (`GSK_RENDERER=gl`, `QT_QPA_PLATFORM=wayland`).
-  - **Navegadores y Multimedia**: Firefox (`MOZ_ENABLE_WAYLAND=1` + WebRender por hardware) para que los videos de YouTube se reproduzcan fluidos a 60 fps sin lag ni saturación de CPU.
-- **Hardware Objetivo**: GPU ARM Mali-G57 MC2 (Valhall 1ra gen, SoC MT6789 Helio G99).
-- **Controladores involucrados**: `mali_kbase_mt6789.ko`, `/dev/mali0`, biblioteca EGL/GLES (blob Mali oficial o Mesa Panfrost / libmali-valhall).
+#### 1. Reactivación del Arranque postmarketOS (Slot A) tras Carga de Batería
+- **Estado Inicial de la Tablet**: Al finalizar la Sesión 8, la batería se agotó (0%). Se configuró el arranque en modo Recovery / Stock en `boot_b` mediante el comando BCB `misc_recovery.bin` para permitir que el hardware cargue sin apagarse por software.
+- **Acción Inmediata**:
+  1. Verificar que la tablet haya alcanzado al menos 20-30% de carga.
+  2. Limpiar la partición `misc` para cancelar el bucle de recovery (`python3 mtkclient/mtk.py e misc`).
+  3. Asegurar que el slot activo sea el slot A (`boot_a` con `pmos_boot_v13.img`).
+  4. Encender la tablet presionando el botón `POWER` durante 5 segundos y verificar ping a `172.16.42.1`.
 
-#### 2. Restauración Definitiva de la Regulación de Brillo de Pantalla (Slider de Phosh)
-- **Problema Detectado**: El hardware de la tablet regula el brillo físico en `/sys/class/leds/lcd-backlight/brightness` (rango 0 a 255), pero GNOME/Phosh busca estrictamente en `/sys/class/backlight/*`. Al estar ausente, D-Bus reporta `HasBrightnessControl = false` y el slider de la barra superior desaparece o no actúa.
-- **Solución Preparada**: Enlace y bind mount dinámico de `/tmp/fake_backlight/lcd-backlight` hacia `/sys/class/backlight` y `/sysroot/sys/class/backlight` con permisos `666`.
-- **Tarea**: Conectar el servicio `gsd-backlight` o vincular la interfaz D-Bus `org.gnome.Shell.Brightness` para que el slider de los Quick Settings de Phosh responda de forma fluida.
+#### 2. Carga Autónoma del Silicio Mali-G57 en el Ramdisk (`v13`)
+- **Problema Resuelto en Sesión 8**: Se descubrió que el driver oficial ARM `mali_kbase_mt6789.ko` dependía de `nvmem_mtk-devinfo.ko` (`mediatek,devinfo`) para leer los fusibles efuse térmicos y de voltaje de la GPU.
+- **Tarea**:
+  - Incorporar de forma permanente `nvmem_mtk-devinfo.ko` en `version_v13/build_pmos_boot_v13.py`.
+  - Asegurar que al arrancar, el initramfs o el servicio OpenRC inicialice la cadena de los 16 módulos de MediaTek de forma 100% desatendida, creando automáticamente `/dev/mali0`.
+
+#### 3. Aceleración Gráfica en Espacio de Usuario (Mesa vs ARM DDK)
+- **Diagnóstico Arquitectónico**:
+  - El driver `mali_kbase` provee el nodo `/dev/mali0` con su protocolo ioctl propietario para el DDK ARM de Android Bionic (`libGLES_mali.so`).
+  - Mesa Gallium en Alpine musl espera un nodo DRM del kernel (`/dev/dri/renderD128`).
+  - El Little Kernel (LK) de MediaTek verifica firmas criptográficas de la imagen del kernel y bloquea kernels modificados con Panfrost upstream (`vmlinuz-panfrost-g57`).
+- **Líneas de Acción para la Sesión 9**:
+  - **Vía A (Recomendada/Práctica)**: Optimizar el renderizado CPU de Mesa con `LP_NUM_THREADS=8` y `pixman`, manteniendo 60 fps estables en Phosh mientras se investiga un puente de compatibilidad.
+  - **Vía B (Aceleración Real vía DDK)**: Evaluar el puente de bibliotecas binarias Bionic (`libhybris` o shim wrapper EGL/GBM) que conecte las llamadas OpenGL ES / Vulkan de Wayland directamente al nodo `/dev/mali0`.
+
+#### 4. Restauración del Control de Brillo de Pantalla (Slider de Phosh)
+- **Problema**: El hardware regula el brillo en `/sys/class/leds/lcd-backlight/brightness` (0..255). Phosh busca en `/sys/class/backlight/*`.
+- **Tarea**: Finalizar el enlace D-Bus o proxy udev para que el slider de los ajustes rápidos de Phosh ajuste el brillo del panel físico.
 
 ---
 
-### 📝 Pasos Inmediatos al Arrancar:
-1. **Comprobar la conexión con la tablet**:
-   ```bash
-   python3 tools/tablet_cmd.py "uptime; uname -a"
-   ```
-2. **Crear y activar la rama de trabajo en Git**:
-   ```bash
-   cd /home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES
-   git checkout -b feature/gpu-global-y-brillo
-   ```
-3. **Inspeccionar el estado del subsistema de GPU y drivers disponibles**:
-   ```bash
-   python3 tools/tablet_cmd.py "ls -l /dev/mali* /dev/dri/*; lsmod | grep -E 'mali|gpu|ged'; apk info -vv | grep -i -E 'mesa|mali|vulkan|gles'"
-   ```
-4. **Verificar regulación de brillo en vivo**:
-   ```bash
-   python3 tools/tablet_cmd.py "chroot /sysroot brightnessctl -d lcd-backlight set 50%; cat /sys/class/leds/lcd-backlight/brightness"
-   ```
-5. **Protocolo Anti-Regresión**:
-   - Si durante las pruebas de GPU se altera el audio, la pantalla no levanta o se descalibra la batería, ejecutar inmediatamente:
-     ```bash
-     python3 tools/restore_live_tablet.py
-     ```
+### 📝 Procedimiento de Reactivación Paso a Paso:
+```bash
+# 1. Comprobar detección USB de la tablet (BROM o Preloader):
+lsusb | grep -i mediatek
+
+# 2. Si la tablet sigue en modo Preloader/BROM y ya cargó suficiente:
+cd /home/danilo/Documentos/TABLET
+# Limpiar misc para salir de recovery:
+python3 mtkclient/mtk.py e misc
+# Resetear la tablet:
+python3 mtkclient/mtk.py reset
+
+# 3. Al iniciar postmarketOS, comprobar la red gadget:
+ping -c 3 172.16.42.1
+python3 tools/tablet_cmd.py "uptime; cat /sys/class/power_supply/battery/capacity"
+
+# 4. Verificar que el silicio Mali esté activo:
+python3 tools/tablet_cmd.py "ls -l /dev/mali0; dmesg | grep -i 'mali 13000000'"
+
+# 5. Protocolo de Rescate en Caliente:
+python3 tools/restore_live_tablet.py
+```
 
 ---
 
@@ -68,66 +75,68 @@
 
 | Subsistema | Componente | Estado | Versión / Commit | Notas |
 | :--- | :--- | :---: | :---: | :--- |
-| **01. Audio** | MT6789 AFE + 4x AW87359 | 🟢 **100% OK** | `v1.0-estable` | Ganancias: 32768 (0 dB), Headset: 12 (+2 dB). PipeWire: S16LE, 48kHz, disable-mmap, period-size 6000. Sonido limpio, nítido y sin siseo. |
-| **02. Batería** | PMIC MT6366 + MT6375 | 🟢 **100% OK** | `v1.0-estable` | Algoritmo OCV 7500mAh ($R_{int}=85\text{ m}\Omega$), Daemon v4 sin killall upowerd. Notificación D-Bus Refresh y uevent. Rayo de carga y porcentaje en tiempo real en Phosh. |
-| **03. Pantalla/Touch**| MIPI-DSI + TDDI Chipone | 🟢 **100% OK** | `v1.0-estable` | Bypass de sesión `libseat_direct.so` inyectado en Phoc. Orientación invertida 180° aplicada sin latencia. Touch fluido. |
-| **04. Wi-Fi** | MediaTek MT6631 / WMT | 🟢 **100% OK** | `v1.0-estable` | Bus WMT inicializado por `wmt_init_complete.c`. Interfaz `wlan0` administrada por NetworkManager. |
+| **01. Audio** | MT6789 AFE + 4x AW87359 | 🟢 **100% OK** | `v1.0-estable` | Ganancias: 32768 (0 dB), Headset: 12 (+2 dB). PipeWire: S16LE, 48kHz, disable-mmap, period-size 6000. Sonido limpio, nítido y sin siseo en los 4 altavoces. |
+| **02. Batería** | PMIC MT6366 + MT6375 | 🟢 **100% OK** | `v1.0-estable` | Algoritmo OCV 7500mAh ($R_{int}=85\text{ m}\Omega$), Daemon v4 sin killall upowerd. Notificación D-Bus Refresh y uevent. Rayo de carga y porcentaje real en Phosh. |
+| **03. Pantalla/Touch**| MIPI-DSI + TDDI Chipone | 🟢 **100% OK** | `v1.0-estable` | Bypass de sesión `libseat_direct.so` inyectado en Phoc. Orientación invertida 180° aplicada sin latencia a 1200x1920. Touch fluido. |
+| **04. Wi-Fi** | MediaTek MT6631 / WMT | 🟢 **100% OK** | `v1.0-estable` | Bus WMT inicializado por `wmt_init_complete.c`. Interfaz `wlan0` administrada por NetworkManager con registro udev dinámico. |
 | **05. Arranque** | Boot v4 + WDT Petter | 🟢 **100% OK** | `v1.0-estable` | Kernel 5.10.185-pmos estable sin reinicio de 30s gracias a `wdt_pet`. Red USB gadget fija en `172.16.42.1`. |
-| **06. Brillo Pantalla**| `lcd-backlight` (PWM) | 🟡 **En Integración**| `v1.0-estable` | Hardware responde (0..255). Se montó `/sys/class/backlight` virtual para que el slider de Phosh lo controle. |
-| **07. GPU / Aceleración**| ARM Mali-G57 MC2 | 🟡 **Silicio OK / En Enlace DRM**| `feature-gpu-hardware-acceleration` | Silicio activado en `/dev/mali0` (Valhall v9 JM r32p1). Perfil `/etc/profile.d/gpu_acceleration.sh` activo. Mesa 26.1 `panfrost_dri.so` listo, en espera de exposición del nodo DRM `renderD128`. |
+| **06. Brillo Pantalla**| `lcd-backlight` (PWM) | 🟡 **En Integración**| `v1.0-estable` | Hardware responde (0..255). Pendiente vincular slider Phosh con `/sys/class/backlight`. |
+| **07. GPU Silicio** | ARM Mali-G57 MC2 | 🟢 **Silicio OK** | `feature-gpu-hardware-acceleration` | **Silicio físico activado exitosamente**: `0x9093` Valhall v9 JM r0p1, 2 núcleos activos (`core_mask = 0x5`), devfreq 390-1100 MHz, `/dev/mali0`. |
+| **08. GPU Espacio Usuario**| Mesa / EGL / Wayland | 🟡 **En Investigación**| `feature-gpu-hardware-acceleration` | Mesa usa `llvmpipe` / `pixman` (8 núcleos CPU) por falta de render node DRM `/dev/dri/renderD128` (bloqueado por firmas OEM en LK). Evaluando shim EGL / libhybris. |
 
 ---
 
 ## 📜 HISTORIAL DE SESIONES Y HITOS COMPLETADOS
 
+### Sesión 8: Intento Panfrost Upstream, Descubrimiento Devlink y Activación Real del Silicio Mali-G57 MC2
+- **Hitos Técnicos**:
+  1. **Compilación de Panfrost Built-in**: Se compiló Linux GKI 5.10.185 con `CONFIG_DRM_PANFROST=y` y `CONFIG_DRM_SCHED=y` integrados para eludir las trampas de Clang CFI (`vmlinuz-panfrost-g57`).
+  2. **Diagnóstico del Bootloader Little Kernel (LK)**: Se descubrió que el Little Kernel de MediaTek realiza una verificación criptográfica obligatoria de la firma del fabricante en la partición `boot`. Al flashear una imagen no firmada (`pmos_boot_v14.img`), el LK aborta el arranque y cae en modo de rescate Preloader USB (`0e8d:2000`). Se restauró con éxito `pmos_boot_v13.img` mediante `mtkclient`.
+  3. **Descubrimiento de la Cadena Devlink de la GPU**:
+     - Se identificó la causa exacta por la cual `mali_kbase_mt6789.ko` y `ged.ko` arrojaban `-517` (`EPROBE_DEFER`): el gobernador `13fbf000.gpufreq` requería acceder a los fusibles de calibración térmica grabados en los efuses del SoC (`11c10000.efuse`).
+     - Se extrajo e insertó el módulo `nvmem_mtk-devinfo.ko` (`mediatek,devinfo`) junto con `mcupm.ko` y `fhctl.ko`.
+  4. **Silicio Mali-G57 MC2 Encendido en Vivo**:
+     - El hardware respondió de inmediato:
+       ```text
+       mali 13000000.mali: GPU identified as 0x3 arch 9.0.9 r0p1 status 0
+       mali 13000000.mali: GPU soft reset completed
+       mali 13000000.mali: Probed as mali0 (JM)
+       ```
+     - Telemetría: 2 núcleos de shaders (`core_mask = 0x5`), devfreq 390 a 1100 MHz, nodo `/dev/mali0` operativo.
+  5. **Gestión de Descarga Profunda de Batería (0%)**:
+     - Al agotarse la batería durante los ensayos, el kernel PMOS se apagaba de emergencia para proteger la celda de litio (al carecer del daemon `kpoc` de Android).
+     - Se preparó el slot B con boot stock y se inyectó el comando BCB `boot-recovery` en `misc` (`misc_recovery.bin`) mediante el script por lotes `mtk_batch.txt`, permitiendo que la tablet cargue de manera segura en modo recovery sin apagarse.
+
 ### Sesión 7: Silicio GPU Mali-G57 Activado y Diagnóstico de Mesa Panfrost vs kbase
-- **Hito**: Activación en caliente y permanente de los núcleos físicos de la GPU ARM Mali-G57 MC2 en el kernel y perfil global de aceleración.
-- **Logros Técnicos de Silicio**:
-  1. Resolución de la cadena topológica completa de dependencias de MediaTek (`tinysys_scmi`, `sspm_v3`, `mtk_gpu_qos`, `ged`, `mali_kbase_mt6789`).
-  2. Inicialización comprobada en dmesg: `mali 13000000.mali: GPU identified as 0x3 arch 9.0.9 r0p1 status 0 (Valhall v9 JM)`.
-  3. Creación y asignación de permisos a `/dev/mali0`.
-  4. Creación del perfil `/etc/profile.d/gpu_acceleration.sh` para aceleración nativa Wayland, GTK4 (`GSK_RENDERER=gl`), Qt y Firefox WebRender en todas las aplicaciones.
-  5. Diagnóstico de arquitectura gráfica: Mesa upstream Panfrost (`panfrost_dri.so`) requiere un nodo render DRM (`/dev/dri/renderD128` provisto por `panfrost.ko` con soporte `arm,mali-valhall-jm`). El hardware responde, la interfaz Phosh corre fluida a 1200x1920 con batería al 29% en vivo, y se trazó la ruta hacia el módulo `panfrost` de Linux 6.0+.
-
-### Sesión 1: Núcleo de Arranque y Control de Watchdog
-- **Hito**: Arranque funcional de postmarketOS Edge en arquitectura A/B Android v4.
-- **Logro de Silicio**: Creación de `wdt_pet.c` para resolver el reinicio forzado por hardware de MediaTek a los 30 segundos. Inyección del árbol DTB para forzar modo periférico USB (red `172.16.42.1`).
-
-### Sesión 2: Subsistema Wi-Fi MediaTek WMT
-- **Hito**: Activación completa de la tarjeta de red inalámbrica MT6631.
-- **Solución**: Creación del binario C `wmt_init_complete.c` para comunicar directamente con `/dev/wmtdetect` y `/dev/stpwmt` sin depender de daemons Bionic de Android. Integración sintética con `udev` y NetworkManager.
-
-### Sesión 3: Pantalla DSI, Touch y Bypass Libseat
-- **Hito**: Levantamiento del entorno gráfico GNOME/Phosh sobre compositor Phoc.
-- **Solución**: Programación de `libseat_direct.c` en ensamblador AArch64 puro para abrir directamente DRM (`/dev/dri/card0`) y evdev sin systemd-logind ni seatd. Corrección de rotación de fábrica a 180°.
-
-### Sesión 4: Medidor OCV de Batería y Cargador
-- **Hito**: Porcentaje de batería en tiempo real y detección del rayo de carga en Phosh.
-- **Solución**: Algoritmo de compensación de resistencia interna ($R_{int} = 85\text{ m}\Omega$) contra tabla OCV de 100 puntos y técnica de bind mount sobre `/sys/class/power_supply/battery/status`.
-
-### Sesión 5: Calibración Definitiva de Audio, Repositorio Central y Diagnóstico de Brillo
-- **Hitos**:
-  1. Identificación y eliminación del siseo/silenciamiento por saturación DRC/AGC en los 4 amplificadores AW87359. Calibración a 0 dB nominal y apagado de reloj parásito I2S3.
-  2. Ajuste de buffer DMA en PipeWire a S16LE / 48kHz / disable-mmap / period-size 6000. Reemplazo de reproductor inestable por Amberol. Audio 100% claro y validado por el usuario.
-  3. Creación del repositorio `FUNCIONALIDADES_FINALES`, compilador `build_all.sh`, herramienta 1-click `restore_live_tablet.py`, manuales técnicos y etiquetado Git `v1.0-estable`.
-  4. Diagnóstico del brillo: resolución de discrepancia entre `/sys/class/leds` y `/sys/class/backlight` para restablecer el slider de Phosh.
+- **Hito**: Mapeo topológico de la GPU e investigación preliminar de dependencias de MediaTek (`tinysys_scmi`, `sspm_v3`, `mtk_gpu_qos`).
 
 ### Sesión 6: Solución Definitiva de Batería en Phosh (Daemon v4 sin killall upowerd)
-- **Hito**: Resolución del fallo donde el icono de batería se quedaba en rojo con 0% al conectar/desconectar el cargador.
-- **Causa Raíz Identificada**: Phosh (`PhoshBatteryManager` / `battery-manager.c`) se conecta por D-Bus a `upowerd` una sola vez. Las versiones anteriores ejecutaban `killall upowerd` al cambiar de estado, rompiendo irreversiblemente el enlace D-Bus de Phosh y forzándolo a mostrar su fallback (`battery-missing-symbolic` en rojo y `0%`).
-- **Solución de Ingeniería**:
-  1. Se eliminó por completo `killall upowerd` de `tablet_battery_daemon.py` y `battery_daemon.c`.
-  2. Se implementó la actualización atómica mediante sintetización de `change` en `/sys/class/power_supply/battery/uevent` y la invocación directa al método D-Bus `org.freedesktop.UPower.Device.Refresh` vía `busctl`.
-  3. Los bind mounts sobre sysfs se mantienen persistentes sin desmontajes agresivos.
-  4. Resultado en vivo: icono con rayo de carga y porcentaje exacto (p. ej. 33%) visible y fluido en Phosh, feedback acústico funcional y estabilidad absoluta validada por el usuario.
+- **Hito**: Eliminación de `killall upowerd`, actualización atómica con D-Bus Refresh y uevent, logrando porcentaje real y rayo de carga estables.
+
+### Sesión 5: Calibración Definitiva de Audio, Repositorio Central y Diagnóstico de Brillo
+- **Hito**: Eliminación del siseo en 4 amplificadores AW87359 (0 dB nominal), PipeWire S16LE 48kHz, repositorio `FUNCIONALIDADES_FINALES` y etiquetado `v1.0-estable`.
+
+### Sesión 4: Medidor OCV de Batería y Cargador
+- **Hito**: Algoritmo OCV de 100 puntos y bind mounts sobre sysfs.
+
+### Sesión 3: Pantalla DSI, Touch y Bypass Libseat
+- **Hito**: Creación de `libseat_direct.c` en ensamblador AArch64 para levantar Phoc/Phosh sin logind. Orientación 180°.
+
+### Sesión 2: Subsistema Wi-Fi MediaTek WMT
+- **Hito**: Inicializador C `wmt_init_complete.c` para MT6631 sobre bus STP.
+
+### Sesión 1: Núcleo de Arranque y Control de Watchdog
+- **Hito**: Creación de `wdt_pet.c` para alimentar el watchdog MediaTek de 30s y forzar USB Gadget `172.16.42.1`.
 
 ---
 
 ## 🗺️ HOJA DE RUTA (BACKLOG DE FUTURAS SESIONES)
 
-- [ ] **Fase 1 (Siguiente sesión - Foco Central)**: 
-  - Aceleración por Hardware GPU ARM Mali-G57 MC2 **GLOBAL** (Compositor Wayland sin Pixman + Phosh + GTK4/Qt + Firefox/YouTube fluido a 60 fps).
-  - Vinculación definitiva del slider de brillo de pantalla en Phosh.
+- [ ] **Fase 1 (Próxima Sesión - Sesión 9)**:
+  - Reactivación tras carga de batería (salida de recovery a slot A).
+  - Automatización de `nvmem_mtk-devinfo.ko` en `build_pmos_boot_v13.py`.
+  - Estrategia de aceleración en espacio de usuario para `/dev/mali0`.
+  - Restauración definitiva del slider de brillo de pantalla en Phosh.
 - [ ] **Fase 2**: Decodificación de video por hardware VPU (MediaTek Vcodec / V4L2 M2M para 1080p/4K a 0% de CPU).
 - [ ] **Fase 3**: Gestión avanzada de energía, suspensión profunda (Deep Sleep) y reactivación por botón físico Power.
 - [ ] **Fase 4**: Soporte de cámaras frontal y trasera (MIPI-CSI) y sensores de orientación física por hardware.

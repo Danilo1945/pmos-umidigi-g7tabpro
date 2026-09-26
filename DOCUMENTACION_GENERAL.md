@@ -185,6 +185,32 @@ La salida de audio estéreo cuádruple utiliza una arquitectura híbrida:
   - Permite levantar Phosh de forma instantánea y 100% estable.
 - *Orientación*: En `phoc.ini` se define `rotate=180` y `scale=1.0`, y tras levantar Wayland se aplica `wlr-randr --output DSI-1 --transform 180`, corrigiendo la inversión nativa de fábrica del panel.
 
+#### C. Aceleración Gráfica por Hardware - Silicio Mali-G57 MC2 (MT6789)
+1. **Intento de Driver Upstream Panfrost (Kernel v14)**:
+   - Se compiló Linux GKI 5.10.185 con `CONFIG_DRM_PANFROST=y` y `CONFIG_DRM_SCHED=y` como `built-in` para eludir la verificación Clang CFI (`BRK 0x800`).
+   - Se adaptaron identificadores Valhall v9 (`0x9003`) y compatibles DT (`mediatek,mali`, `arm,mali-valhall`).
+   - *Comportamiento del Bootloader*: El Little Kernel (LK) de MediaTek valida las firmas digitales criptográficas del binario del kernel (`vmlinux`/`Image.gz`). Al detectar un kernel modificado no firmado por el OEM, aborta el arranque y pasa al modo de emergencia Preloader USB (`0e8d:2000`).
+2. **Descubrimiento y Activación del Silicio con Drivers de Fábrica (`mali_kbase`)**:
+   - Se descubrió que el driver nativo de ARM `mali_kbase_mt6789.ko` y MediaTek GED (`ged.ko`) permanecían bloqueados en `EPROBE_DEFER` (`-517`) por dependencias de enlace de hardware (`devlink`):
+     - `13000000.mali` depende de `soc:ged`
+     - `soc:ged` depende de `13fbf000.gpufreq`
+     - `13fbf000.gpufreq` depende de `11c10000.efuse` y `1000ce00.fhctl`
+   - *Solución al Bloqueo*: Se extrajo y cargó el módulo de calibración térmica y fusibles `nvmem_mtk-devinfo.ko` (`mediatek,devinfo`) junto con `mcupm.ko` y `fhctl.ko`.
+   - **Resultado en Silicio Real**:
+     ```text
+     mali 13000000.mali: GPU identified as 0x3 arch 9.0.9 r0p1 status 0
+     mali 13000000.mali: GPU soft reset completed
+     mali 13000000.mali: Probed as mali0 (JM)
+     probe of 13000000.mali returned 1
+     ```
+     - Silicio activo: `Mali-G57 2 cores r0p1 0x9093`.
+     - Shaders activos: `core_mask = 0x5` (los 2 núcleos de cómputo GPU operando).
+     - Frecuencias dinámicas: `devfreq` escalando entre 390 MHz y 1100 MHz.
+     - Nodo de control: `/dev/mali0` (carácter 10, 116).
+3. **Situación Actual del Espacio de Usuario (Mesa vs ARM DDK)**:
+   - El driver `mali_kbase` no expone un nodo DRM/KMS tradicional (`/dev/dri/renderD128`), sino una API ioctl propietaria para el DDK de ARM en Android Bionic.
+   - Mesa Gallium/DRI en Alpine Linux (musl) requiere `/dev/dri/renderD128` para vincular Panfrost. Por ello, Mesa opera mediante el renderizador `llvmpipe` / `pixman` (8 hilos de CPU Cortex-A76/A55) sobre el display controller `/dev/dri/card0` (`mediatek_drm` a 60 Hz).
+
 ---
 
 ### 4.4. SUBSISTEMA 04: WI-FI Y CONECTIVIDAD (WMT MT6631)
@@ -270,6 +296,38 @@ git reset --hard v1.0-estable
 python3 tools/restore_live_tablet.py
 ```
 
+### 5.5. Protocolo de Rescate por Descarga Profunda de Batería (0%)
+Si la batería se descarga por completo (0%), postmarketOS no implementa el modo `kpoc` (Kernel Power-Off Charging), lo que provoca que el kernel se apague inmediatamente al arrancar para proteger la celda de litio, impidiendo la recarga normal:
+1. **Poner en modo Recovery stock (Slot B)**:
+   Se utiliza el script por lotes de `mtkclient`:
+   ```bash
+   cd /home/danilo/Documentos/TABLET
+   ./flash_recovery_slot_b.sh
+   # O ejecutar por lotes:
+   python3 mtkclient/mtk.py batch mtk_batch.txt
+   ```
+2. **Carga Segura**:
+   Conectar el cargador de pared. El bootloader entrará en Recovery/Carga de fábrica, donde el hardware alimenta la batería sin apagarse por software.
+3. **Reactivación de postmarketOS**:
+   Una vez alcanzado más del 20% de carga, salir del bucle de recovery borrando la partición `misc`:
+   ```bash
+   python3 /home/danilo/Documentos/TABLET/mtkclient/mtk.py e misc
+   python3 /home/danilo/Documentos/TABLET/mtkclient/mtk.py reset
+   ```
+
+### 5.6. Inicialización y Control del Silicio GPU Mali-G57 MC2
+Para activar los 2 núcleos de shaders de la GPU ARM Mali-G57 MC2 en caliente:
+```bash
+# Carga de la cadena devlink de 16 módulos:
+for mod in nvmem_mtk-devinfo.ko mcupm.ko fhctl.ko mtk_gpu_hal.ko sspm_v3.ko mtk_qos.ko mtk-ssc.ko gpueb.ko mtk_bp_thl.ko mtk_battery_oc_throttling.ko mtk_gpufreq_wrapper.ko mtk_gpu_qos.ko mtk_gpufreq_mt6789.ko ged.ko mali_mgm_mt6789.ko mali_kbase_mt6789.ko; do
+    insmod /lib/modules/$mod 2>/dev/null
+done
+
+# Crear nodo de control con permisos globales:
+mknod -m 666 /dev/mali0 c 10 116
+mknod -m 666 /sysroot/dev/mali0 c 10 116
+```
+
 ---
 
 ## 6. TABLA RESUMEN DE COMPONENTES Y CONTROLADORES
@@ -281,3 +339,5 @@ python3 tools/restore_live_tablet.py
 | **Pantalla / Touch** | `mediatek_drm`, `tddi_9551` | `libseat_direct.c`, `phoc.ini`, `start_phosh.sh` | `/usr/lib/libseat_direct.so`, `/etc/phoc.ini` | ✅ Estable (Wayland GLES2 180°) |
 | **Wi-Fi** | `wmt_drv`, `wlan_drv_gen4m_6789` | `wmt_init_complete.c`, `wmt_wifi_start.sh` | `/usr/bin/wmt_init_complete`, `/dev/wmtWifi` | ✅ Estable (`wlan0` activo) |
 | **Kernel / Boot** | `musb_hdrc`, `mtk_wdt` | `wdt_pet.c`, `pmos_usb_peripheral.dtb` | `boot_a`, `vendor_boot_a` | ✅ Estable (Sin reboot de 30s) |
+| **GPU Silicio** | `mali_kbase_mt6789`, `ged`, `nvmem_mtk-devinfo` | `/lib/modules/*.ko`, `/etc/profile.d/gpu_acceleration.sh` | `/dev/mali0`, `13000000.mali` | ✅ **Silicio Físico OK** (2 núcleos, 390-1100 MHz, Valhall v9) |
+
