@@ -60,15 +60,10 @@ for numid in 282 279 276 273; do
     amixer -c 0 cset numid=$numid 0 2>/dev/null || true
 done
 
-# 3. Cargar Módulos de GPU ARM Mali-G57 MC2 (Cadena de Dependencias Topológica)
-for m in tinysys-scmi mrdump pmic_lbat_service mtk_low_battery_throttling \
-         mtk_dynamic_loading_throttling mtk_mdpm mtk_pbm mtk_bp_thl mtk_battery_oc_throttling \
-         mtk-mbox mtk_rpmsg_mbox mtk_tinysys_ipi aee_aed mtk-ssc gpueb mtk_gpufreq_wrapper \
-         mtk_dramc emi-mpu emi mtk-icc-core mmprofile mtk-smi mtk-smi-dbg mtk-mmdvfs \
-         mtk-mmdvfs-debug mmqos-common sspm_v3 mtk_qos mtk_gpu_qos system_heap clkbuf \
-         leds-mtk mtk_slbc iommu_secure iommu_debug mtk_panel_ext mtk_disp_notify mtk_sync \
-         clk-common irq-dbg vcp_status device-apc-common mtk-cmdq-drv-ext mtk-mml \
-         cmdq_helper_inf mediatek-drm mtk_gpu_hal ged mali_kbase_mt6789; do
+# 3. Cargar Módulos de GPU ARM Mali-G57 MC2 (Cadena de Dependencias Topológica Validada en Silicio)
+for m in nvmem_mtk-devinfo mcupm fhctl mtk_gpu_hal sspm_v3 mtk_qos mtk-ssc gpueb \
+         mtk_bp_thl mtk_battery_oc_throttling mtk_gpufreq_wrapper mtk_gpu_qos \
+         mtk_gpufreq_mt6789 ged mali_mgm_mt6789 mali_kbase_mt6789; do
     insmod /lib/modules/$m.ko 2>/dev/null || insmod $MODDIR/$m.ko 2>/dev/null || true
 done
 modprobe mali_kbase_mt6789 2>/dev/null || true
