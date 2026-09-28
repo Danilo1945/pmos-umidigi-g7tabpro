@@ -149,9 +149,9 @@ rotate=180
 PHOCEOF
 
 
-# Control de brillo: permisos y nivel óptimo (70% - 180/255)
+# Control de brillo: permisos y nivel óptimo (27% - 70/255 seguro contra UVLO)
 chmod 666 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-echo 180 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+echo 70 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
 # Asegurar SHM en el chroot
 mkdir -p /dev/shm

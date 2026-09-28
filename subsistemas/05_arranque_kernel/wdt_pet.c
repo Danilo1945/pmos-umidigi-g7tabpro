@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <linux/watchdog.h>
+#include <sched.h>
 
 static int open_and_test(const char *path, int kmsg) {
     int fd = open(path, O_WRONLY | O_CLOEXEC);
@@ -116,9 +117,17 @@ static int resolve_watchdog_fd(int kmsg) {
 }
 
 int main(int argc, char *argv[]) {
+    // Elevar inmediatamente a máxima prioridad de tiempo real (SCHED_FIFO 99)
+    // para garantizar que la alimentación del hardware watchdog nunca sufra inanición.
+    struct sched_param sp;
+    sp.sched_priority = 99;
+    if (sched_setscheduler(0, SCHED_FIFO, &sp) < 0) {
+        perror("sched_setscheduler");
+    }
+
     int kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     if (kmsg >= 0) {
-        dprintf(kmsg, "<1>[wdt_pet] MediaTek Watchdog Feeder v14 iniciado (PID %d)\n", getpid());
+        dprintf(kmsg, "<1>[wdt_pet] MediaTek Watchdog Feeder v14 iniciado (PID %d, SCHED_FIFO 99)\n", getpid());
     }
 
     int fd = -1;

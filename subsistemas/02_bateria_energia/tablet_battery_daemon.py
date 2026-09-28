@@ -212,6 +212,17 @@ def main():
             write_file(PATH_INIT, 1)
             ensure_charger_limits()
             vbat = read_int(PATH_VOLTAGE, 0)
+            if vbat < 2500000:
+                # Fallback al ADC de hardware del PMIC MT6366 (AUXADC BATADC en mV)
+                for adc_path in [
+                    "/sys/bus/iio/devices/iio:device1/in_voltage0_BATADC_input",
+                    "/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device1/in_voltage0_BATADC_input"
+                ]:
+                    adc_mv = read_int(adc_path, 0)
+                    if adc_mv > 2500:
+                        vbat = adc_mv * 1000
+                        break
+
             raw_curr = read_int(PATH_RAW_CURRENT, 0)
             online = read_int(PATH_ONLINE_CHG, 0)
             chg_status = read_str(PATH_STATUS_CHG, "")

@@ -137,6 +137,26 @@ ORDERED_EARLY_MODULES = [
     "ccci_md_all.ko",
     "btif_drv.ko",
     "wmt_drv.ko",
+    # Módulos de Batería AUXADC (PMIC MT6366)
+    "mt635x-auxadc.ko",
+    # Silicio GPU ARM Mali-G57 MC2 (Cadena devlink óptima)
+    "nvmem_mtk-devinfo.ko",
+    "mcupm.ko",
+    "sspm_v3.ko",
+    "mtk_tinysys_ipi.ko",
+    "mtk-ssc.ko",
+    "gpueb.ko",
+    "fhctl.ko",
+    "mtk_gpu_hal.ko",
+    "mtk_qos.ko",
+    "mtk_bp_thl.ko",
+    "mtk_battery_oc_throttling.ko",
+    "mtk_gpufreq_wrapper.ko",
+    "mtk_gpu_qos.ko",
+    "mtk_gpufreq_mt6789.ko",
+    "ged.ko",
+    "mali_mgm_mt6789.ko",
+    "mali_kbase_mt6789.ko",
 ]
 
 def align_4k(size):
@@ -318,6 +338,14 @@ def prepare_initramfs_v9(output_gz_path):
         shutil.copy2(wmt_bin_src, wmt_bin_dst)
         os.chmod(wmt_bin_dst, 0o755)
         print(f"  [+] wmt_init_complete instalado en {wmt_bin_dst}")
+
+    # backlight_guard (Supervisor Anti-UVLO para estabilización de hardware)
+    guard_bin_src = "/home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/subsistemas/03_pantalla_rotacion_touch/backlight_guard"
+    if os.path.exists(guard_bin_src):
+        guard_bin_dst = os.path.join(workdir, "bin", "backlight_guard")
+        shutil.copy2(guard_bin_src, guard_bin_dst)
+        os.chmod(guard_bin_dst, 0o755)
+        print(f"  [+] backlight_guard instalado en {guard_bin_dst}")
 
     # wmt_wifi_start.sh (Script integral de encendido de Wi-Fi con android_compat y STP)
     wmt_wifi_sh = os.path.join(workdir, "bin", "wmt_wifi_start.sh")
@@ -595,7 +623,12 @@ cp -f /bin/gpio_switch /sysroot/usr/bin/gpio_switch 2>/dev/null || true
 cp -f /bin/wmt_init_complete /sysroot/usr/bin/wmt_init_complete 2>/dev/null || true
 cp -f /bin/wmt_wifi_start.sh /sysroot/usr/bin/wmt_wifi_start.sh 2>/dev/null || true
 cp -f /bin/start_plasma_mobile.sh /sysroot/usr/bin/start_plasma_mobile.sh 2>/dev/null || true
-chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh 2>/dev/null || true
+cp -f /bin/backlight_guard /sysroot/usr/bin/backlight_guard 2>/dev/null || true
+cp -f /bin/backlight_guard /sysroot/bin/backlight_guard 2>/dev/null || true
+cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
+chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
+mknod /sysroot/dev/mali0 c 10 116 2>/dev/null || true
+chmod 666 /sysroot/dev/mali0 2>/dev/null || true
 
 # Copiar bundle android_compat y firmwares oficiales a sysroot
 if [ -d /android_compat ]; then
@@ -939,6 +972,9 @@ if [ -x /bin/wdt_pet ]; then
 elif [ -x /sbin/wdt_pet ]; then
     /sbin/wdt_pet &
 fi
+if [ -x /bin/backlight_guard ]; then
+    /bin/backlight_guard &
+fi
 (while true; do
     printf "\x01" > /dev/watchdog0 2>/dev/null || true
     printf "\x01" > /dev/watchdog 2>/dev/null || true
@@ -982,6 +1018,8 @@ if [ -f /lib/modules/modules.early.order ]; then
     done < /lib/modules/modules.early.order
 fi
 switch_typec
+mknod /dev/mali0 c 10 116 2>/dev/null || true
+chmod 666 /dev/mali0 2>/dev/null || true
 
 # 3. Configuración de Gadget USB ConfigFS
 mkdir -p /sys/kernel/config /config
