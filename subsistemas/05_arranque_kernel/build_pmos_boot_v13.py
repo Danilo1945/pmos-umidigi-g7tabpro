@@ -137,26 +137,6 @@ ORDERED_EARLY_MODULES = [
     "ccci_md_all.ko",
     "btif_drv.ko",
     "wmt_drv.ko",
-    # Módulos de Batería AUXADC (PMIC MT6366)
-    "mt635x-auxadc.ko",
-    # Silicio GPU ARM Mali-G57 MC2 (Cadena devlink óptima)
-    "nvmem_mtk-devinfo.ko",
-    "mcupm.ko",
-    "sspm_v3.ko",
-    "mtk_tinysys_ipi.ko",
-    "mtk-ssc.ko",
-    "gpueb.ko",
-    "fhctl.ko",
-    "mtk_gpu_hal.ko",
-    "mtk_qos.ko",
-    "mtk_bp_thl.ko",
-    "mtk_battery_oc_throttling.ko",
-    "mtk_gpufreq_wrapper.ko",
-    "mtk_gpu_qos.ko",
-    "mtk_gpufreq_mt6789.ko",
-    "ged.ko",
-    "mali_mgm_mt6789.ko",
-    "mali_kbase_mt6789.ko",
 ]
 
 def align_4k(size):

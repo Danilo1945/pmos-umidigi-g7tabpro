@@ -80,14 +80,14 @@ chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 chmod -R 666 /dev/input /sysroot/dev/input 2>/dev/null || true
 chown -R 10000:23 /sysroot/dev/input 2>/dev/null || true
 
-# 5. Entorno de usuario danilo
-export HOME=/home/danilo
-export USER=danilo
-export XDG_RUNTIME_DIR=/tmp/runtime-danilo
-export PULSE_SERVER="unix:/tmp/runtime-danilo/pulse/native"
-export PULSE_COOKIE="/home/danilo/.config/pulse/cookie"
-chmod 777 $XDG_RUNTIME_DIR 2>/dev/null || true
-chown -R danilo:danilo $XDG_RUNTIME_DIR /home/danilo 2>/dev/null || true
+# 5. Entorno de ejecucion para Phoc + Phosh (Root + libseat_direct)
+export HOME=/root
+export USER=root
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+mkdir -p /tmp/runtime-root
+chmod 700 /tmp/runtime-root
+chown root:root /tmp/runtime-root
+export PULSE_SERVER="unix:/tmp/runtime-root/pulse/native"
 
 # Iniciar bus de sistema D-Bus, udevd y NetworkManager
 mkdir -p /run/dbus /var/run/dbus
@@ -163,7 +163,7 @@ export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_RENDERER=pixman
 export WLR_RENDERER_ALLOW_SOFTWARE=1
-export LP_NUM_THREADS=8
+export LP_NUM_THREADS=4
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
 export SDL_VIDEODRIVER=wayland
@@ -173,7 +173,7 @@ export XDG_SESSION_DESKTOP=phosh
 export MOZ_ENABLE_WAYLAND=1
 
 # Forzar orientación 180 manteniendo salida encendida una vez levantado Wayland
-(sleep 4; WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-danilo /usr/bin/wlr-randr --output DSI-1 --on --mode 1200x1920 --transform 180 2>/dev/null || true) &
+(sleep 4; WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR /usr/bin/wlr-randr --output DSI-1 --on --mode 1200x1920 --transform 180 2>/dev/null || true) &
 
 while true; do
     rm -f $XDG_RUNTIME_DIR/wayland-*

@@ -92,9 +92,12 @@ python3 tools/restore_live_tablet.py
      - Se integraron los 16 módulos de la cadena devlink (`nvmem_mtk-devinfo.ko`, `mcupm.ko`, `sspm_v3.ko`, `mtk_gpu_hal.ko`, `ged.ko`, `mali_kbase_mt6789.ko`) y `mt635x-auxadc.ko` en `ORDERED_EARLY_MODULES` dentro de `build_pmos_boot_v13.py`.
      - Generación automática de nodos `/dev/mali0` y `/sysroot/dev/mali0` con permisos `0666` en el arranque temprano.
      - Ajuste de `LP_NUM_THREADS=4` para que el renderizado por software deje 4 núcleos de CPU libres en todo momento para la fluidez de entrada y daemons.
-  4. **Flasheo en Caliente con Paridad Total en Slots A y B**:
-     - Se compiló la imagen `pmos_boot_v13.img` (64 MB) y se transfirió por red USB Gadget a `/dev/sdc28` (`boot_a`) y `/dev/sdc51` (`boot_b`).
-     - Verificación criptográfica MD5 idéntica en host y ambas particiones de la tablet: `29c9de7605d29d056c5058ea903b5a28`.
+  4. **Diagnóstico de Asimetría de Slots y Rescate BROM vía mtkclient**:
+     - Tras una inserción prematura de módulos devlink en el initramfs que causó un ciclo de reinicio de LK, se utilizó `mtkclient` en modo BROM (`0e8d:2000`).
+     - Se descubrió que la escritura de múltiples particiones en lote interrumpía el handshake tras la primera; `boot_a` (sector 174592) se había grabado al 100%, pero la tablet arrancaba desde el **Slot B** (`boot_b` en sector 313856).
+     - Se desarrolló `flash_boot_b.py` para escribir directamente la partición activa `boot_b` con la imagen limpia `pmos_boot_v13.img`.
+     - Ambos slots quedaron sincronizados de forma idéntica, erradicando al 100% el reinicio cíclico.
+     - Al arrancar en frío, la tablet reconectó inmediatamente por USB Gadget (`172.16.42.1`) con uptime continuo y estable, batería al 92% (4157 mV) y nodo `/dev/mali0` activo.
 
 ### Sesión 9: Superación del Logo UMIDIGI, Arranque de Phosh (1200x1920 @ 60Hz), GPU Mali-G57 Activa y Gestión de Hibernación
 - **Hitos Técnicos**:
