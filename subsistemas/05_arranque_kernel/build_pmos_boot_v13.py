@@ -125,7 +125,7 @@ ORDERED_EARLY_MODULES = [
     # Módulos de entrada (Touchscreen TDDI y teclas físicas)
     "mtk-pmic-keys.ko",
     "mtk-kpd.ko",
-    "tddi_9551.ko",
+    "tddi_9551.ko", # TDDI Chipone parcheado seguro (fts_disp_notifier y cts_plat_set_reset neutralizados)
     # Módulos de conectividad base MediaTek
     "cfg80211.ko",
     "connadp.ko",

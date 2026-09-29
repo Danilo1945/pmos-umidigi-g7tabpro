@@ -32,7 +32,7 @@ is_hardware_muted = False
 last_known_volume = 0.50
 
 is_screen_on = True
-saved_backlight_level = 255
+saved_backlight_level = 70
 last_power_press_time = 0.0
 
 # Orientacion del sensor: "bottom-up" = 180 grados (al derecho para la tablet del usuario)
@@ -230,12 +230,21 @@ def get_current_backlight():
         with open("/sys/class/leds/lcd-backlight/brightness", "r") as f:
             return int(f.read().strip())
     except Exception:
-        return 255
+        return 70
 
 def set_backlight_hardware(level):
     try:
+        val = int(level)
+        if val <= 0:
+            safe_level = 0
+        elif val < 10:
+            safe_level = 10
+        elif val > 75:
+            safe_level = 75
+        else:
+            safe_level = val
         with open("/sys/class/leds/lcd-backlight/brightness", "w") as f:
-            f.write(f"{int(level)}\n")
+            f.write(f"{safe_level}\n")
     except Exception:
         pass
 

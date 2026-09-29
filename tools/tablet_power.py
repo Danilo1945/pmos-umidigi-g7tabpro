@@ -92,8 +92,9 @@ def cmd_wake():
     print("[*] Despertando la tablet y reactivando la pantalla...")
     cmd = (
         "for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo schedutil > $g 2>/dev/null; done; "
-        "echo 180 > /sys/class/leds/lcd-backlight/brightness; "
-        "echo '[+] Pantalla reactivada (brillo 180) y CPUs en modo schedutil.' > /dev/kmsg; "
+        "echo 70 > /sys/class/leds/lcd-backlight/brightness; "
+        "chmod 444 /sys/class/leds/lcd-backlight/brightness; "
+        "echo '[+] Pantalla reactivada (brillo 70) y CPUs en modo schedutil.' > /dev/kmsg; "
         "echo 'OK_WAKE'"
     )
     res = run_cmd(cmd)
