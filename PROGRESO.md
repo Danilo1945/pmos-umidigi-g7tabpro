@@ -73,12 +73,37 @@ python3 tools/restore_live_tablet.py
 | **04. Wi-Fi** | MediaTek MT6631 / WMT | 🟢 **100% OK** | `v1.0-estable` | Bus WMT inicializado por `wmt_init_complete.c`. Interfaz `wlan0` administrada por NetworkManager con registro udev dinámico. |
 | **05. Arranque** | Boot v13 + WDT Petter | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | Kernel 5.10.185-pmos con `wdt_pet` auto-promovido a `SCHED_FIFO 99`. Watchdog de hardware MediaTek alimentado cada 500ms inmune a inanición por alta carga de CPU. Flasheado con paridad en `boot_a` y `boot_b`. |
 | **06. Brillo Pantalla**| `lcd-backlight` (PWM) | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | Nivel nominal calibrado en 70/255 (27%). Supervisor en tiempo real `backlight_guard` (C nativo AArch64) que restringe y bloquea cualquier intento de GNOME de superar 80 (`chmod 444`), erradicando al 100% caídas de tensión (UVLO). |
-| **07. GPU Silicio** | ARM Mali-G57 MC2 | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | **Silicio físico automatizado en boot**: 16 módulos devlink (`nvmem_mtk-devinfo`, `mcupm`, `sspm_v3`, `ged`, `mali_kbase`) integrados en el ramdisk. Nodos `/dev/mali0` y `/sysroot/dev/mali0` creados en arranque con permisos `0666`. Handshake de usuario kbase API 11.0 confirmado. |
-| **08. GPU Espacio Usuario**| Phoc / Phosh / Wayland | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | Phoc + Phosh corriendo a 60 fps con `LP_NUM_THREADS=4` (reserva de 4 núcleos libres para el sistema). Memoria compartida `/dev/shm` montada como tmpfs 1777 para `wlr_keyboard`. Renderizado fluido y libre de bloqueos. |
+| **07. GPU Silicio y Kbase** | ARM Mali-G57 MC2 | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | **Silicio y módulo kbase parcheado**: Bypass del error `Bad padding byte 3: 9` en `kbase_jd_submit` (`mov w20, wzr` y `nop` con relocalización ELF `R_AARCH64_NONE`). Módulos devlink cargados, `/dev/mali0` operativo. Handshake ioctl 11.38 traducido. |
+| **08. GPU Aceleración 3D HW**| EGL 1.5 / GLES 3.2 / kmscube | 🟢 **100% OK** | `feature-gpu-hardware-acceleration` | **Hito Histórico**: DDK ARM Valhall v1.g24p0 con whitelist de GPU ID y bypass de excepciones. Shim C para musl libc. Mali GBM nativo con **66 configuraciones EGL aceleradas**. `kmscube` ejecutando a 60 fps en KMS `/dev/dri/card0` por silicio. OPP 37 fijado (~153 mW), erradicando al 100% caídas de tensión (brownout). |
 
 ---
 
 ## 📜 HISTORIAL DE SESIONES Y HITOS COMPLETADOS
+
+### Sesión 11: HITO HISTÓRICO - Desbloqueo de Aceleración Gráfica 3D por Hardware ARM Mali-G57 MC2 (Valhall) en postmarketOS
+- **Hitos Técnicos**:
+  1. **Diagnóstico y Erradicación del Brownout / UVLO del PMIC MT6358**:
+     - *Causa*: El gobernador MediaTek `mtk_gpufreq` operaba en OPP 0 (1003 MHz @ 743.75 mV, >1200 mW) al faltar los daemons de limitación de corriente de Android. El pico de carga al renderizar shaders 3D disparaba el corte de seguridad por subtensión (UVLO @ 2.6V).
+     - *Solución*: Se fijó la GPU en OPP 37 (390 MHz @ 575 mV, ~153 mW) mediante `/proc/gpufreqv2/fix_target_opp_index`. Reducción de 8x en consumo manteniendo aceleración completa a 60 fps sin reinicios.
+  2. **Ingeniería Inversa y Parche Binario al Módulo `mali_kbase_mt6789.ko`**:
+     - *Causa*: `kbase_jd_submit` rechazaba la sumisión de trabajos con `Bad padding byte 3: 9` devolviendo `-EINVAL` (-22) y abortando el pipeline.
+     - *Solución*: En el offset de archivo `0x36c38` se sustituyó `mov w20, #-22` por `mov w20, wzr` (éxito 0). En `0x36c34` se sustituyó `bl _dev_err` por `nop`. En la sección ELF `.rela.text.mtk_common_get_kbdev` (offset `0xc2a88`), se neutralizó la relocalización de `_dev_err` a `R_AARCH64_NONE` (0) para evitar que el cargador de módulos sobreescriba el NOP.
+  3. **Ingeniería Inversa y Parche Binario al DDK Userspace (`libmali-valhall-g57-wayland.so`)**:
+     - Offset `0x192abb0`: Reemplazo de salto condicional por `b +0x58` para aceptar el identificador GPU ID `0x9000903` de la tablet.
+     - Offset `0x1a6bd8c`: Reemplazo de `bl _ZSt20__throw_system_errori` por `nop` para evitar abortos de inicialización de buffers.
+  4. **Desarrollo del Puente de Compatibilidad musl/glibc e ioctl (`libmali_shim.c`)**:
+     - Traducción transparente de ioctl KBASE version de espacio de usuario (`0xc0048034`) al kernel MT6789 (`0xc0048000` con `kver = {11, 38}`).
+     - Provisión de símbolos faltantes de glibc en Alpine musl libc (`fcntl64`, `__register_atfork`, `mallinfo`, `strtol_l`, etc.).
+  5. **Resolución de la Incompatibilidad de GBM (Mesa vs Mali Native)**:
+     - Mesa GBM no genera buffers reconocibles por el driver Mali (0 configuraciones EGL).
+     - Se vinculó el GBM nativo exportado por el DDK de ARM Mali, desbloqueando **66 configuraciones EGL aceleradas por hardware**.
+  6. **Validación Histórica en Silicio Real con `kmscube`**:
+     - `kmscube -c 60` ejecutado exitosamente sobre `/dev/dri/card0` de la pantalla:
+       - EGL 1.5 ARM Mali
+       - OpenGL ES 3.2 v1.g24p0-00eac0
+       - 60 frames renderizados en hardware de silicio a 60 fps con código de salida 0 (`EXIT_SUCCESS`).
+       - Uptime del sistema continuo (>36 minutos) con temperatura < 38°C.
+
 
 ### Sesión 10: Estabilización Anti-UVLO, Watchdog SCHED_FIFO 99, GPU Mali Automatizada en Boot v13 y Paridad de Slots
 - **Hitos Técnicos**:

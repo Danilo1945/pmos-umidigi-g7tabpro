@@ -20,11 +20,16 @@ echo "[3/4] Compilando Subsistema 04: Wi-Fi y Conectividad WMT..."
 make -C "$ROOT_DIR/subsistemas/04_wifi_conectividad" clean
 make -C "$ROOT_DIR/subsistemas/04_wifi_conectividad"
 
-echo "[4/4] Compilando Subsistema 05: Arranque y Watchdog Petter..."
+echo "[4/5] Compilando Subsistema 05: Arranque y Watchdog Petter..."
 make -C "$ROOT_DIR/subsistemas/05_arranque_kernel" clean
 make -C "$ROOT_DIR/subsistemas/05_arranque_kernel"
+
+echo "[5/5] Compilando Subsistema 06: Aceleración Gráfica GPU ARM Mali-G57 (libmali_shim.so)..."
+make -C "$ROOT_DIR/subsistemas/06_aceleracion_grafica_gpu" clean
+make -C "$ROOT_DIR/subsistemas/06_aceleracion_grafica_gpu"
 
 echo ""
 echo "=========================================================="
 echo " 🎉 ¡TODOS LOS SUBSISTEMAS HAN SIDO COMPILADOS CON ÉXITO! "
 echo "=========================================================="
+

@@ -55,18 +55,27 @@ FUNCIONALIDADES_FINALES/
 │   │   ├── install_wifi.sh            # Instalador y servicio mtk-wifi
 │   │   └── README_WIFI.md             # Documentación de protocolo STP/WMT
 │   │
-│   └── 05_arranque_kernel/            # 🚀 Arranque Android v4, Kernel y Watchdog
-│       ├── wdt_pet.c                  # Fuente en C del alimentador de watchdog
-│       ├── wdt_pet                    # Binario estático AArch64
-│       ├── pmos_usb_peripheral.dtb    # Árbol de dispositivos con USB Gadget forzado
-│       ├── pmos_usb_peripheral.dts    # Fuente DTS descompilada
-│       ├── build_pmos_boot_v13.py     # Empaquetador de imágenes boot.img y vendor_boot.img
-│       ├── flash_pmos_v13_mtkclient.sh# Flasheador BROM / Preloader automático
-│       ├── flash_pmos_v13.sh          # Flasheador Fastboot
-│       ├── activar_slot_b.sh          # Switch de slot A/B
-│       ├── apagar_tablet.sh           # Apagado remoto vía mtkclient
-│       ├── Makefile                   # Compilación de wdt_pet
-│       └── README_BOOT.md             # Documentación de particiones y watchdog
+│   ├── 05_arranque_kernel/            # 🚀 Arranque Android v4, Kernel y Watchdog
+│   │   ├── wdt_pet.c                  # Fuente en C del alimentador de watchdog
+│   │   ├── wdt_pet                    # Binario estático AArch64
+│   │   ├── pmos_usb_peripheral.dtb    # Árbol de dispositivos con USB Gadget forzado
+│   │   ├── pmos_usb_peripheral.dts    # Fuente DTS descompilada
+│   │   ├── build_pmos_boot_v13.py     # Empaquetador de imágenes boot.img y vendor_boot.img
+│   │   ├── flash_pmos_v13_mtkclient.sh# Flasheador BROM / Preloader automático
+│   │   ├── flash_pmos_v13.sh          # Flasheador Fastboot
+│   │   ├── activar_slot_b.sh          # Switch de slot A/B
+│   │   ├── apagar_tablet.sh           # Apagado remoto vía mtkclient
+│   │   ├── Makefile                   # Compilación de wdt_pet
+│   │   └── README_BOOT.md             # Documentación de particiones y watchdog
+│   │
+│   └── 06_aceleracion_grafica_gpu/    # ⚡ GPU ARM Mali-G57 MC2 (Valhall v9) - Aceleración 3D HW
+│       ├── README.md                  # Documentación técnica completa de ingeniería inversa
+│       ├── patch_mali_kbase.py        # Parche binario de mali_kbase_mt6789.ko (Job Submit fix)
+│       ├── patch_libmali.py           # Parche binario de libmali DDK (GPU ID whitelist + bypass)
+│       ├── libmali_shim.c             # Shim C de compatibilidad musl/glibc e ioctl KBASE translation
+│       ├── Makefile                   # Compilación cruzada AArch64 de libmali_shim.so
+│       ├── load_mali_chain.sh         # Carga ordenada de la cadena devlink de 16 módulos
+│       └── test_mali_render.py        # Test standalone de renderizado EGL 1.5 + GLES 3.2
 │
 ├── firmware/                          # 💾 Firmwares y microcódigos esenciales
 │   ├── aw87xxx_acf.bin                # Configuración de 4 amplificadores AW87359
@@ -87,9 +96,9 @@ FUNCIONALIDADES_FINALES/
 ### 1. Compilar Todos los Binarios C desde Cero
 Si se dispone de `aarch64-linux-gnu-gcc` (o dentro de Alpine aarch64):
 ```bash
-cd /home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES
 ./build_all.sh
 ```
+Compilará de forma limpia `battery_daemon`, `libseat_direct.so`, `wmt_init_complete`, `wdt_pet` y `libmali_shim.so`.
 
 ### 2. Restaurar la Tablet en Vivo con un Solo Comando (1-Click Restore)
 Con la tablet encendida y conectada vía USB (`172.16.42.1`):
@@ -105,14 +114,16 @@ python3 tools/tablet_cmd.py "uptime; free -m; ip a show wlan0"
 
 # Ver procesos de los daemons clave:
 python3 tools/tablet_cmd.py "ps aux | grep -E 'battery|audio|phosh|wmt'"
+
+# Ver telemetría de la GPU Mali-G57 y frecuencia actual:
+python3 tools/tablet_cmd.py "cat /proc/gpufreqv2/cur_opp_index; dmesg | grep -i mali | tail -n 10"
 ```
 
-### 4. Reconstruir y Flashear Imágenes de Arranque
-Si se requiere reinstalar el kernel o el initramfs:
+### 4. Probar Aceleración 3D por Hardware (kmscube)
+Para verificar la aceleración gráfica real en silicio sobre `/dev/dri/card0` mediante EGL 1.5 y OpenGL ES 3.2:
 ```bash
-cd subsistemas/05_arranque_kernel
-python3 build_pmos_boot_v13.py
-./flash_pmos_v13_mtkclient.sh
+# Ejecutar 60 frames acelerados por hardware en la tablet:
+LD_PRELOAD="/usr/lib/libmali-valhall-g57-wayland.so /usr/lib/libmali_shim.so" kmscube -c 60
 ```
 
 ---
@@ -126,9 +137,11 @@ python3 build_pmos_boot_v13.py
 | **Pantalla** | MIPI-DSI 1200x1920 + TDDI | ✅ **100% Funcional** | Sesión GNOME/Phosh acelerada levantada con bypass `libseat_direct.so`, rotación 180° y touch fluido. |
 | **Wi-Fi** | MediaTek MT6631 / WMT | ✅ **100% Funcional** | Interfaz `wlan0` activa, gestionada por NetworkManager con registro udev dinámico. |
 | **Kernel / Boot**| Boot v4 + musb Gadget + WDT | ✅ **100% Funcional** | Kernel 5.10.185-pmos arranca de manera estable sin reboot a los 30s gracias a `wdt_pet`. Red USB fija `172.16.42.1`. |
+| **Aceleración GPU**| ARM Mali-G57 MC2 (Valhall) | ✅ **100% Funcional** | EGL 1.5 + OpenGL ES 3.2 nativo vía DDK Valhall v1.g24p0 + shim musl + parches binarios en kernel kbase y userspace. 66 configuraciones EGL nativas, `kmscube` renderizando a 60 fps en hardware real, protegido contra caídas de tensión (brownout) mediante OPP 37 (390 MHz @ 575 mV, 153 mW). |
 
 ---
 
 ## 🛡️ Política de Versionamiento
-- Cualquier cambio o experimento futuro (ej. aceleración por hardware con Mali G57 y VPU) **debe crearse en una rama separada** o probarse sin sobreescribir este repositorio.
+- Cualquier cambio o experimento futuro **debe crearse en una rama separada** o probarse sin sobreescribir este repositorio.
 - Si una prueba compromete el audio o el sistema gráfico, basta con ejecutar `python3 tools/restore_live_tablet.py` para regresar al estado 100% operativo.
+

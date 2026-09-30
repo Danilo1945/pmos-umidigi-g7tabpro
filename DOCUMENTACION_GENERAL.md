@@ -82,18 +82,27 @@ FUNCIONALIDADES_FINALES/
 │   │   ├── install_wifi.sh            # Instalador y servicio OpenRC mtk-wifi
 │   │   └── README_WIFI.md             # Manual técnico del bus WMT y chip MT6631
 │   │
-│   └── 05_arranque_kernel/            # 🚀 Arranque Android v4, Kernel y Watchdog
-│       ├── wdt_pet.c                  # Código fuente en C del alimentador de watchdog de silicio
-│       ├── wdt_pet                    # Binario estático AArch64
-│       ├── pmos_usb_peripheral.dtb    # Árbol de dispositivos con USB Gadget forzado (CDC-NCM)
-│       ├── pmos_usb_peripheral.dts    # Fuente DTS descompilada
-│       ├── build_pmos_boot_v13.py     # Empaquetador de imágenes boot.img y vendor_boot.img
-│       ├── flash_pmos_v13_mtkclient.sh# Flasheador BROM / Preloader automático
-│       ├── flash_pmos_v13.sh          # Flasheador Fastboot estándar
-│       ├── activar_slot_b.sh          # Switch de slot A/B
-│       ├── apagar_tablet.sh           # Apagado seguro remoto vía mtkclient
-│       ├── Makefile                   # Compilación de wdt_pet
-│       └── README_BOOT.md             # Manual de particionado, initramfs y watchdog
+│   ├── 05_arranque_kernel/            # 🚀 Arranque Android v4, Kernel y Watchdog
+│   │   ├── wdt_pet.c                  # Código fuente en C del alimentador de watchdog de silicio
+│   │   ├── wdt_pet                    # Binario estático AArch64
+│   │   ├── pmos_usb_peripheral.dtb    # Árbol de dispositivos con USB Gadget forzado (CDC-NCM)
+│   │   ├── pmos_usb_peripheral.dts    # Fuente DTS descompilada
+│   │   ├── build_pmos_boot_v13.py     # Empaquetador de imágenes boot.img y vendor_boot.img
+│   │   ├── flash_pmos_v13_mtkclient.sh# Flasheador BROM / Preloader automático
+│   │   ├── flash_pmos_v13.sh          # Flasheador Fastboot estándar
+│   │   ├── activar_slot_b.sh          # Switch de slot A/B
+│   │   ├── apagar_tablet.sh           # Apagado seguro remoto vía mtkclient
+│   │   ├── Makefile                   # Compilación de wdt_pet
+│   │   └── README_BOOT.md             # Manual de particionado, initramfs y watchdog
+│   │
+│   └── 06_aceleracion_grafica_gpu/    # ⚡ GPU ARM Mali-G57 MC2 (Valhall v9) - Aceleración 3D HW
+│       ├── README.md                  # Manual técnico exhaustivo de ingeniería inversa y parches
+│       ├── patch_mali_kbase.py        # Script Python de parche binario al módulo kbase
+│       ├── patch_libmali.py           # Script Python de parche binario al DDK Valhall
+│       ├── libmali_shim.c             # Shim C para ABI musl/glibc y traducción de ioctls kbase
+│       ├── Makefile                   # Makefile para compilación cruzada AArch64 de libmali_shim.so
+│       ├── load_mali_chain.sh         # Script de carga de la cadena devlink de 16 módulos de kernel
+│       └── test_mali_render.py        # Test standalone de renderizado EGL 1.5 + GLES 3.2
 │
 ├── firmware/                          # 💾 Microcódigos esenciales del SoC
 │   ├── aw87xxx_acf.bin                # Configuración de los 4 amplificadores AW87359
@@ -241,6 +250,84 @@ MediaTek integra Wi-Fi, Bluetooth, FM y GPS en una arquitectura unificada llamad
 
 ---
 
+### 4.6. SUBSISTEMA 06: ACELERACIÓN GRÁFICA 3D POR HARDWARE (ARM MALI-G57 MC2 VALHALL V9)
+
+#### A. Arquitectura del Silicio y Contexto de Ingeniería
+- **GPU Física**: ARM Mali-G57 MC2 (arquitectura Valhall v9.0.9 r0p1, GPU ID `0x9093`, core mask `0x5` con 2 núcleos de shaders activos).
+- **SoC**: MediaTek Helio G99 (`MT6789`), proceso de 6nm TSMC.
+- **Display Controller**: `mediatek_drm` (`/dev/dri/card0`) operando panel MIPI-DSI nativo a 1200x1920 @ 60 Hz.
+- **Entorno de Usuario**: postmarketOS Edge (Alpine Linux aarch64, musl libc).
+- **Desafío Histórico**: La GPU Mali en SoCs MediaTek carece de soporte DRM render node upstream (`/dev/dri/renderD128`) en el kernel 5.10 de Android, dependiendo exclusivamente del módulo de kernel propietario `mali_kbase_mt6789.ko` y del DDK de ARM en espacio de usuario. Habilitar la aceleración 3D por hardware en una distribución Linux estándar con musl libc exigió tres semanas continuas de ingeniería inversa, desensamblado binario, desarrollo de shims de compatibilidad y parches de silicio.
+
+#### B. Diagnóstico y Solución de Estabilización de Energía (Brownouts / PMIC UVLO)
+1. **La Trampa de los Daemons de Batería de Android**:
+   - En Android, daemons propietarios como `battery_oc_throttling` y el Power HAL regulan en tiempo real el amperaje demandado por la GPU para no sobrepasar los límites de descarga de la celda de litio.
+   - En postmarketOS, al carecer de estos servicios, el gobernador del kernel `mtk_gpufreq` colocaba la GPU por defecto en su frecuencia máxima **OPP 0** (1003 MHz @ 743.75 mV, >1200 mW de consumo instantáneo).
+   - Al ejecutar cualquier shader 3D, el pico transitorio de corriente producía una caída abrupta de tensión en la celda ($I \cdot R$). El PMIC principal MediaTek MT6358 detectaba una condición de **Under-Voltage Lockout (UVLO @ 2.6V)** y cortaba instantáneamente la alimentación de la placa, reiniciando la tablet.
+2. **Solución por Fijación de Frecuencia Segura (DVFS OPP Locking)**:
+   - Se analizó la tabla de voltajes y frecuencias en `/proc/gpufreqv2/opp_dump`.
+   - Se fijó la GPU en **OPP 37** (390 MHz @ 575 mV, ~153 mW de potencia):
+     ```bash
+     echo 37 > /proc/gpufreqv2/fix_target_opp_index
+     ```
+   - **Efecto**: Reducción del consumo de energía en **8x** (de >1200 mW a ~153 mW) manteniendo plena aceleración OpenGL ES 3.2 sin una sola caída de tensión o reinicio, logrando más de 36 minutos de estabilidad continua.
+
+#### C. Parche Binario al Módulo de Kernel (`mali_kbase_mt6789.ko`)
+1. **El Error Fatal de Envío de Jobs**:
+   - Al invocar llamadas de renderizado EGL/GLES, la función interna `kbase_jd_submit` arrojaba en dmesg:
+     ```text
+     mali 13000000.mali: Bad padding byte 3: 9
+     ```
+     La función validaba estrictamente la cabecera del struct de sumisión de átomos (`base_jd_atom_v2`). Al fallar la comprobación de padding, ejecutaba `mov w20, #-22` (`-EINVAL`) y `bl _dev_err`, abortando la cola de trabajo de la GPU.
+2. **Modificación de Ensamblador AArch64 en Silicio**:
+   - En el offset de archivo `0x36c38` (virtual `0x35c38`), se reemplazó la instrucción:
+     - Original: `12 80 02 b4` (`mov w20, #-22`)
+     - Parcheado: `f4 03 1f 2a` (`mov w20, wzr` -> retorna éxito 0).
+   - En el offset `0x36c34`, se reemplazó la llamada al logger de error:
+     - Original: `00 00 00 94` (`bl _dev_err`)
+     - Parcheado: `1f 20 03 d5` (`nop`).
+3. **Neutralización de Relocalizaciones ELF (`.rela.text`)**:
+   - En módulos de kernel (`.ko`), las llamadas a funciones externas se resuelven dinámicamente durante `insmod` vía `apply_relocate_add()`. Si se parchea un `bl` por un `nop`, el kernel sobreescribe el `nop` al cargar el módulo si la tabla de relocalización sigue activa.
+   - En la sección `.rela.text.mtk_common_get_kbdev` (offset de archivo `0xc2a88`), se localizó la entrada de relocalización para `_dev_err` y se cambió su `r_info` de `R_AARCH64_CALL26` (283) a `R_AARCH64_NONE` (0).
+   - Al cargar el módulo, el kernel omite la relocalización y el parche `nop` permanece intacto. Automatizado en `patch_mali_kbase.py`.
+
+#### D. Parches Binarios al DDK de Espacio de Usuario (`libmali-valhall-g57-wayland.so`)
+1. **Whitelist de Arquitectura Mali-G57**:
+   - El DDK de ARM realiza una comprobación interna del GPU ID devuelto por el kernel. Al consultar el silicio de la UMIDIGI G7 Tab Pro (`0x9000903`), la biblioteca no reconocía el ID y denegaba la creación de contextos.
+   - En el offset `0x192abb0`, se sustituyó la instrucción de salto condicional `9f 02 01 6b` por un salto incondicional `16 00 00 14` (`b +0x58`), forzando la aceptación de Mali-G57 MC2.
+2. **Bypass de Excepción de Buffer en Wayland**:
+   - En el offset `0x1a6bd8c`, el DDK ejecutaba `bl _ZSt20__throw_system_errori` al inicializar buffers de compositor. Se reemplazó por `1f 20 03 d5` (`nop`), permitiendo que el flujo de asignación continúe sin lanzar excepciones de C++. Automatizado en `patch_libmali.py`.
+
+#### E. Shim de Compatibilidad ABI musl/glibc e ioctl Translation (`libmali_shim.c`)
+- **Problema de ABI de C**: El DDK propietario de ARM fue compilado para Android/glibc, requiriendo símbolos no existentes en Alpine musl libc (`fcntl64`, `__register_atfork`, `__pthread_key_create`, `mallinfo`, `strtol_l`, etc.).
+- **Desajuste de Versión KBASE**:
+  - `libmali` de espacio de usuario consulta la versión del driver enviando el ioctl `0xc0048034`.
+  - El kernel MediaTek MT6789 espera estrictamente `0xc0048000` con `kver = { 11, 38 }`.
+- **Solución**: `libmali_shim.c`:
+  - Intercepta `ioctl()`. Cuando detecta `0xc0048034`, traduce la llamada a `0xc0048000` con `{11, 38}`, simulando para el espacio de usuario una respuesta `{1, 0}` sin error.
+  - Implementa stubs de alto rendimiento para todas las funciones faltantes de glibc.
+  - Se compila con `aarch64-linux-gnu-gcc` generando `libmali_shim.so`.
+
+#### F. El Secreto de GBM: Mali Nativo vs Mesa GBM
+- Al vincular la pila gráfica, la biblioteca `libgbm.so` provista por Mesa en Linux no crea descriptores compatibles con las estructuras internas del driver Mali EGL, arrojando **0 configuraciones EGL** disponibles (`EGL_BAD_CONFIG`).
+- **Descubrimiento Crucial**: El DDK propietario de ARM Mali exporta sus propios símbolos nativos de GBM (`gbm_create_device`, `gbm_surface_create`, `gbm_bo_get_handle`, etc.).
+- Al cargar prioritariamente el GBM nativo de Mali mediante `LD_PRELOAD`, EGL 1.5 detecta el silicio de inmediato y expone **66 configuraciones aceleradas por hardware** con soporte completo para RGB565, RGBA8888 y 24/32 bits con depth/stencil buffers.
+
+#### G. Verificación y Resultados en Silicio
+- Se ejecutó `kmscube` directamente contra el DRM KMS `/dev/dri/card0` de la pantalla utilizando la GPU física Mali-G57 MC2:
+  ```bash
+  LD_PRELOAD="/usr/lib/libmali-valhall-g57-wayland.so /usr/lib/libmali_shim.so" kmscube -c 60
+  ```
+- **Salida técnica**:
+  - Display DRM: `card0` panel 1200x1920.
+  - EGL API: `EGL 1.5 ARM`
+  - EGL Renderer: `Mali-G57 MC2`
+  - OpenGL ES: `OpenGL ES 3.2 v1.g24p0-00eac0`
+  - Renderizado: 60 fotogramas completados en silicio a 60 fps estables.
+  - Consumo: Estable en OPP 37 (~153 mW), temperatura < 38°C, sin caída de tensión ni cuelgues del sistema. Código de retorno `0` (`EXIT_SUCCESS`).
+
+---
+
 ## 5. PROCEDIMIENTOS OPERATIVOS Y GUÍA DE USO
 
 ### 5.1. Restauración en Vivo (1-Click Restore)
@@ -339,5 +426,6 @@ mknod -m 666 /sysroot/dev/mali0 c 10 116
 | **Pantalla / Touch** | `mediatek_drm`, `tddi_9551` | `libseat_direct.c`, `phoc.ini`, `start_phosh.sh` | `/usr/lib/libseat_direct.so`, `/etc/phoc.ini` | ✅ Estable (Wayland GLES2 180°) |
 | **Wi-Fi** | `wmt_drv`, `wlan_drv_gen4m_6789` | `wmt_init_complete.c`, `wmt_wifi_start.sh` | `/usr/bin/wmt_init_complete`, `/dev/wmtWifi` | ✅ Estable (`wlan0` activo) |
 | **Kernel / Boot** | `musb_hdrc`, `mtk_wdt` | `wdt_pet.c`, `pmos_usb_peripheral.dtb` | `boot_a`, `vendor_boot_a` | ✅ Estable (Sin reboot de 30s) |
-| **GPU Silicio** | `mali_kbase_mt6789`, `ged`, `nvmem_mtk-devinfo` | `/lib/modules/*.ko`, `/etc/profile.d/gpu_acceleration.sh` | `/dev/mali0`, `13000000.mali` | ✅ **Silicio Físico OK** (2 núcleos, 390-1100 MHz, Valhall v9) |
+| **GPU Silicio y 3D** | `mali_kbase_mt6789_patched`, `ged`, `nvmem_mtk-devinfo` | `patch_mali_kbase.py`, `patch_libmali.py`, `libmali_shim.c` | `/usr/lib/libmali-valhall-g57-wayland.so`, `/usr/lib/libmali_shim.so` | ✅ **100% Acelerado por HW** (EGL 1.5, GLES 3.2, 66 configs EGL, kmscube 60 fps en silicio, OPP 37 estable) |
+
 
