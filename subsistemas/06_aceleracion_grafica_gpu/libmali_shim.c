@@ -30,9 +30,6 @@ int __register_atfork(void (*prepare)(void), void (*parent)(void),
     return pthread_atfork(prepare, parent, child);
 }
 
-int __pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
-    return pthread_key_create(key, destructor);
-}
 
 struct mallinfo { int a; };
 struct mallinfo mallinfo(void) { struct mallinfo m = {0}; return m; }
@@ -51,7 +48,11 @@ struct kbase_ioctl_version_check {
     unsigned short minor;
 };
 
+#ifdef __GLIBC__
 int ioctl(int fd, unsigned long request, ...) {
+#else
+int ioctl(int fd, int request, ...) {
+#endif
     va_list ap;
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
