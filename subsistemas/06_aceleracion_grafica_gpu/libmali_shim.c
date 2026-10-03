@@ -84,8 +84,124 @@ int ioctl(int fd, int request, ...) {
         return 0;
     }
 
+    // Si el driver invoca directamente 0x40048001 y falla por flags ya establecidos (-EPERM), ignorar
+    if (req == 0x40048001) {
+        long ret = syscall(SYS_ioctl, fd, 0x40048001, arg);
+        if (ret < 0) return 0;
+        return ret;
+    }
 
     return syscall(SYS_ioctl, fd, request, arg);
+}
+
+/* ========================================================================= */
+/* INTERCEPTACIÓN GBM: Forzado de Modificador LINEAR (0) en Scanout           */
+/* Evita fallos de hardware en el display controller mediatek_drm por AFBC.   */
+/* ========================================================================= */
+
+struct gbm_device;
+struct gbm_bo;
+struct gbm_surface;
+
+#define GBM_BO_USE_SCANOUT (1 << 0)
+#define GBM_BO_USE_RENDERING (1 << 2)
+
+struct gbm_bo *gbm_bo_create(struct gbm_device *gbm,
+                             uint32_t width, uint32_t height,
+                             uint32_t format, uint32_t flags)
+{
+    static struct gbm_bo *(*real_gbm_bo_create)(struct gbm_device *, uint32_t, uint32_t, uint32_t, uint32_t) = NULL;
+    static struct gbm_bo *(*real_gbm_bo_create_with_modifiers2)(struct gbm_device *, uint32_t, uint32_t, uint32_t, const uint64_t *, const unsigned int, uint32_t) = NULL;
+
+    if (!real_gbm_bo_create) {
+        real_gbm_bo_create = dlsym(RTLD_NEXT, "gbm_bo_create");
+    }
+    if (!real_gbm_bo_create_with_modifiers2) {
+        real_gbm_bo_create_with_modifiers2 = dlsym(RTLD_NEXT, "gbm_bo_create_with_modifiers2");
+    }
+
+    if ((flags & GBM_BO_USE_SCANOUT) && real_gbm_bo_create_with_modifiers2) {
+        const uint64_t linear_mod = 0; // DRM_FORMAT_MOD_LINEAR
+        struct gbm_bo *bo = real_gbm_bo_create_with_modifiers2(gbm, width, height, format, &linear_mod, 1, flags);
+        if (bo) return bo;
+    }
+
+    if (real_gbm_bo_create) {
+        return real_gbm_bo_create(gbm, width, height, format, flags);
+    }
+    return NULL;
+}
+
+struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *gbm,
+                                            uint32_t width, uint32_t height,
+                                            uint32_t format,
+                                            const uint64_t *modifiers,
+                                            const unsigned int count,
+                                            uint32_t flags)
+{
+    static struct gbm_bo *(*real_gbm_bo_create_with_modifiers2)(struct gbm_device *, uint32_t, uint32_t, uint32_t, const uint64_t *, const unsigned int, uint32_t) = NULL;
+    if (!real_gbm_bo_create_with_modifiers2) {
+        real_gbm_bo_create_with_modifiers2 = dlsym(RTLD_NEXT, "gbm_bo_create_with_modifiers2");
+    }
+
+    if ((flags & GBM_BO_USE_SCANOUT) && real_gbm_bo_create_with_modifiers2) {
+        const uint64_t linear_mod = 0; // DRM_FORMAT_MOD_LINEAR
+        return real_gbm_bo_create_with_modifiers2(gbm, width, height, format, &linear_mod, 1, flags);
+    }
+
+    if (real_gbm_bo_create_with_modifiers2) {
+        return real_gbm_bo_create_with_modifiers2(gbm, width, height, format, modifiers, count, flags);
+    }
+    return NULL;
+}
+
+struct gbm_surface *gbm_surface_create(struct gbm_device *gbm,
+                                       uint32_t width, uint32_t height,
+                                       uint32_t format, uint32_t flags)
+{
+    static struct gbm_surface *(*real_gbm_surface_create)(struct gbm_device *, uint32_t, uint32_t, uint32_t, uint32_t) = NULL;
+    static struct gbm_surface *(*real_gbm_surface_create_with_modifiers2)(struct gbm_device *, uint32_t, uint32_t, uint32_t, const uint64_t *, const unsigned int, uint32_t) = NULL;
+
+    if (!real_gbm_surface_create) {
+        real_gbm_surface_create = dlsym(RTLD_NEXT, "gbm_surface_create");
+    }
+    if (!real_gbm_surface_create_with_modifiers2) {
+        real_gbm_surface_create_with_modifiers2 = dlsym(RTLD_NEXT, "gbm_surface_create_with_modifiers2");
+    }
+
+    if ((flags & GBM_BO_USE_SCANOUT) && real_gbm_surface_create_with_modifiers2) {
+        const uint64_t linear_mod = 0; // DRM_FORMAT_MOD_LINEAR
+        struct gbm_surface *surf = real_gbm_surface_create_with_modifiers2(gbm, width, height, format, &linear_mod, 1, flags);
+        if (surf) return surf;
+    }
+
+    if (real_gbm_surface_create) {
+        return real_gbm_surface_create(gbm, width, height, format, flags);
+    }
+    return NULL;
+}
+
+struct gbm_surface *gbm_surface_create_with_modifiers2(struct gbm_device *gbm,
+                                                      uint32_t width, uint32_t height,
+                                                      uint32_t format,
+                                                      const uint64_t *modifiers,
+                                                      const unsigned int count,
+                                                      uint32_t flags)
+{
+    static struct gbm_surface *(*real_gbm_surface_create_with_modifiers2)(struct gbm_device *, uint32_t, uint32_t, uint32_t, const uint64_t *, const unsigned int, uint32_t) = NULL;
+    if (!real_gbm_surface_create_with_modifiers2) {
+        real_gbm_surface_create_with_modifiers2 = dlsym(RTLD_NEXT, "gbm_surface_create_with_modifiers2");
+    }
+
+    if ((flags & GBM_BO_USE_SCANOUT) && real_gbm_surface_create_with_modifiers2) {
+        const uint64_t linear_mod = 0; // DRM_FORMAT_MOD_LINEAR
+        return real_gbm_surface_create_with_modifiers2(gbm, width, height, format, &linear_mod, 1, flags);
+    }
+
+    if (real_gbm_surface_create_with_modifiers2) {
+        return real_gbm_surface_create_with_modifiers2(gbm, width, height, format, modifiers, count, flags);
+    }
+    return NULL;
 }
 
 

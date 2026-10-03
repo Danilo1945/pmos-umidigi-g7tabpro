@@ -70,19 +70,16 @@ echo "[7/8] launch_phosh_user.sh iniciado en espera del socket wayland-0"
     chroot /sysroot /bin/sh -c 'WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-danilo /usr/bin/wlr-randr --output DSI-1 --on --mode 1200x1920 --transform 180 2>/dev/null || true'
 ) &
 
-# 9. Iniciar Phoc compositor con escaneo lineal seguro (Pixman dumb buffer) y aceleración Wayland
-nohup chroot /sysroot /bin/sh -c '
+# 9. Iniciar Phoc compositor con aceleracion GLES2 por GPU Mali-G57 y scanout lineal forzado
+setsid chroot /sysroot /bin/sh -c '
     export HOME=/home/danilo
     export USER=danilo
     export XDG_RUNTIME_DIR=/tmp/runtime-danilo
     export WLR_BACKENDS=drm,libinput
     export WLR_NO_HARDWARE_CURSORS=1
-    export WLR_DRM_NO_MODIFIERS=1
-    export WLR_RENDERER=pixman
-    export WLR_RENDERER_ALLOW_SOFTWARE=1
-    export LP_NUM_THREADS=4
-    LD_PRELOAD=/usr/lib/libseat_direct.so /usr/bin/phoc -C /etc/phoc.ini
+    export WLR_RENDERER=gles2
+    LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.6 /usr/lib/libmali_shim.so /usr/lib/libmali-bifrost.so /usr/lib/libseat_direct.so" exec /usr/bin/phoc -C /etc/phoc.ini
 ' </dev/null >/sysroot/var/log/phoc_live.log 2>&1 &
 
-echo "[8/8] Phoc compositor lanzado con scanout lineal estable"
+echo "[8/8] Phoc compositor lanzado con aceleracion GLES2 Mali-G57"
 echo "PHOSH_PIPELINE_COMPLETE"
