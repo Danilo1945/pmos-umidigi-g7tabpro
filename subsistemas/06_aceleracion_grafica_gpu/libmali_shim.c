@@ -74,6 +74,18 @@ int ioctl(int fd, int request, ...) {
         return 0;
     }
 
+    // KBASE_IOCTL_SET_FLAGS de libmali userspace = 0x40108002 (_IOW(0x80, 2, 16 bytes))
+    // El kernel MediaTek MT6789 espera 0x40048001 (_IOW(0x80, 1, 4 bytes)) con máscara 0x7a
+    if (req == 0x40108002) {
+        if (!arg) return 0;
+        uint32_t flags = *(uint32_t *)arg;
+        uint32_t safe_flags = flags & 0x7a;
+        syscall(SYS_ioctl, fd, 0x40048001, &safe_flags);
+        return 0;
+    }
+
+
     return syscall(SYS_ioctl, fd, request, arg);
 }
+
 

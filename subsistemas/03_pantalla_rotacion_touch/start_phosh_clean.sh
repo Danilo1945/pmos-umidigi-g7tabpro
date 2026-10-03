@@ -3,6 +3,15 @@ set -e
 
 echo "=== INICIANDO PHOSH LIMPIO (USUARIO DANILO + LIBSEAT + SHM 1777) ==="
 
+# 0. Asegurar módulos de GPU Mali-G57 y reloj OPP 37
+if [ -x /sysroot/usr/bin/load_mali_chain.sh ]; then
+    /sysroot/usr/bin/load_mali_chain.sh 2>/dev/null || true
+elif [ -f /bin/load_mali_chain.sh ]; then
+    sh /bin/load_mali_chain.sh 2>/dev/null || true
+fi
+echo 37 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
+chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
+
 # 1. Elevar wdt_pet a SCHED_FIFO 99
 for p in $(pgrep wdt_pet); do
     chroot /sysroot /usr/bin/chrt -f -p 99 "$p" 2>/dev/null || true
@@ -61,7 +70,7 @@ echo "[7/8] launch_phosh_user.sh iniciado en espera del socket wayland-0"
     chroot /sysroot /bin/sh -c 'WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-danilo /usr/bin/wlr-randr --output DSI-1 --on --mode 1200x1920 --transform 180 2>/dev/null || true'
 ) &
 
-# 9. Iniciar Phoc compositor con libseat_direct
+# 9. Iniciar Phoc compositor con escaneo lineal seguro (Pixman dumb buffer) y aceleración Wayland
 nohup chroot /sysroot /bin/sh -c '
     export HOME=/home/danilo
     export USER=danilo
@@ -75,5 +84,5 @@ nohup chroot /sysroot /bin/sh -c '
     LD_PRELOAD=/usr/lib/libseat_direct.so /usr/bin/phoc -C /etc/phoc.ini
 ' </dev/null >/sysroot/var/log/phoc_live.log 2>&1 &
 
-echo "[8/8] Phoc compositor lanzado con libseat_direct"
+echo "[8/8] Phoc compositor lanzado con scanout lineal estable"
 echo "PHOSH_PIPELINE_COMPLETE"
