@@ -33,17 +33,36 @@
 
 ---
 
-## 3. Archivos Incluidos
-- `libseat_direct.c`: Código fuente en C del bypass de libseat.
+## 3. Gestión de Energía, Bloqueo de Pantalla y Suspensión
+
+1. **Daemon de Control de Hardware (`tablet_power_daemon.py`)**:
+   - Captura exclusiva mediante `EVIOCGRAB` sobre `/dev/input/event3` (`mtk-pmic-keys` - Tecla Power) y `/dev/input/event0` (`mtk-kpd` - Teclas de volumen).
+   - **Botón Power Físico**:
+     - *Pulsación 1 (Apagar/Suspender)*: Bloquea la sesión Phosh (`org.gnome.ScreenSaver.Lock()`), apaga el backlight a 0 nits y conmuta CPUs a `powersave`.
+     - *Pulsación 2 (Despertar)*: Conmuta CPUs a `schedutil`, reactiva la salida DRM DSI-1 a 180°, enciende backlight a 200 y despierta la pantalla de bloqueo de Phosh.
+   - **Menú de Energía de Phosh ("Suspender" Táctil)**:
+     - El daemon expone `org.freedesktop.login1.Manager` en el bus del sistema (`Suspend`, `CanSuspend -> 'yes'`, `PrepareForSleep`) y `org.gnome.SessionManager` en el bus de sesión (`Shutdown`, `Reboot`).
+     - Al tocar "Suspender" en la pantalla táctil, Phosh invoca `login1.Manager.Suspend()`, ejecutando el mismo ciclo de reposo profundo.
+   - **Rotación y Sensores (`net.hadess.SensorProxy`)**:
+     - Expone interfaz de orientación para que el widget de rotación de la barra superior de Phosh conmute entre Portrait (180°) y Landscape (90°/270°).
+   - **Credenciales del Sistema**:
+     - Contraseña unificada para `danilo` y `root`: **`1234`**.
+
+---
+
+## 4. Archivos Incluidos
+- `tablet_power_daemon.py`: Daemon de control para botón de encendido, suspensión D-Bus, volumen y rotación.
+- `libseat_direct.c`: Código fuente en C del bypass de libseat con soporte `DRM_IOCTL_SET_MASTER`.
 - `libseat_direct.so`: Biblioteca compartida compilada aarch64.
-- `phoc.ini`: Configuración de geometría, escala y rotación de pantalla.
-- `start_phosh.sh`: Script maestro de arranque del entorno de escritorio móvil GNOME/Phosh.
+- `phoc.ini`: Configuración de geometría, escala y rotación de pantalla (`rotate=180`).
+- `start_phosh.sh`: Script maestro de supervisión y arranque de Phoc/Phosh con variables Wayland y D-Bus.
+- `backlight_guard`: Centinela seguro de retroiluminación.
 - `Makefile`: Script para compilar `libseat_direct.so`.
 - `install_display.sh`: Instalador de componentes al sistema de archivos.
 
 ---
 
-## 4. Compilación e Instalación
+## 5. Compilación e Instalación
 ```bash
 # Para compilar libseat_direct.so:
 make
