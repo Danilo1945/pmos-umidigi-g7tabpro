@@ -37,7 +37,7 @@ def run_cmd(cmd):
 
 def get_battery_status():
     cmd = (
-        "modprobe mt635x_auxadc 2>/dev/null; "
+        "cat /sys/class/power_supply/battery/voltage_now 2>/dev/null || "
         "cat /sys/bus/iio/devices/iio:device1/in_voltage0_BATADC_input 2>/dev/null || "
         "cat /sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device1/in_voltage0_BATADC_input 2>/dev/null"
     )
@@ -45,7 +45,9 @@ def get_battery_status():
     try:
         lines = [l.strip() for l in out.splitlines() if l.strip().isdigit()]
         if lines:
-            v_mv = int(lines[-1])
+            val = int(lines[-1])
+            # Si viene en microvoltios (ej: 4033000), convertir a milivoltios
+            v_mv = val // 1000 if val > 100000 else val
             soc = calc_soc(v_mv)
             return v_mv, soc
     except Exception:

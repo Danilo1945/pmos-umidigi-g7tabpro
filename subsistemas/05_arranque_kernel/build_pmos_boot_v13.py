@@ -147,9 +147,10 @@ def prepare_initramfs_v9(output_gz_path):
     print("==================================================")
     print(" 1. Preparando Initramfs Modular v9.0           ")
     print("==================================================")
-    workdir = "/tmp/pmos_custom_initfs_v9"
+    workdir = "/home/danilo/Documentos/TABLET/version_v13/custom_initfs_v13"
     shutil.rmtree(workdir, ignore_errors=True)
     os.makedirs(workdir, exist_ok=True)
+
 
     raw_initramfs = "/home/danilo/.local/var/pmbootstrap/chroot_rootfs_umidigi-g7tabpro/boot/initramfs"
     print(f"Extrayendo initramfs base: {raw_initramfs}")
@@ -188,10 +189,10 @@ def prepare_initramfs_v9(output_gz_path):
             continue
         s = os.path.join(vendor_mod_dir, item)
         if os.path.isfile(s):
-            shutil.copy2(s, os.path.join(target_mod_dir, item))
             shutil.copy2(s, os.path.join(target_krel_dir, item))
             copied += 1
     print(f"  Módulos copiados: {copied}  |  Omitidos (blacklist): {skipped}")
+
 
     # Copiar firmwares oficiales (Chipone TDDI y Wi-Fi) al initramfs
     target_fw_dir = os.path.join(workdir, "lib/firmware")
@@ -206,16 +207,18 @@ def prepare_initramfs_v9(output_gz_path):
                 fw_copied += 1
     print(f"  [+] Firmwares embebidos en initramfs: {fw_copied} archivos en {target_fw_dir}")
 
-    # Copiar bundle android_compat oficial (linker64, wmt_loader, wmt_launcher y librerías)
+    # Copiar bundle android_compat oficial (solo lo requerido para wmt_launcher / Wi-Fi)
     host_compat_dir = "/home/danilo/Documentos/TABLET/android_compat"
     target_compat_dir = os.path.join(workdir, "android_compat")
     if os.path.exists(host_compat_dir):
-        shutil.copytree(host_compat_dir, target_compat_dir, dirs_exist_ok=True)
+        shutil.copytree(host_compat_dir, target_compat_dir, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("*mali*", "*ladder*", "libutils.so"))
         for b in ["linker64", "wmt_loader", "wmt_launcher"]:
             bp = os.path.join(target_compat_dir, "bin", b)
             if os.path.exists(bp):
                 os.chmod(bp, 0o755)
-        print(f"  [+] Bundle android_compat embebido exitosamente en {target_compat_dir}")
+        print(f"  [+] Bundle android_compat optimizado embebido exitosamente en {target_compat_dir}")
+
 
     # Crear rutas y enlaces de firmware estándar de Android que busca wmt_launcher
     for ad in ["vendor/firmware", "system/etc/firmware", "system/vendor/firmware", "data/vendor/stp_dump", "data/vendor/connsyslog"]:
@@ -239,25 +242,24 @@ def prepare_initramfs_v9(output_gz_path):
                     pass
 
     # Parche verificado en musb_hdrc.ko para forzar pullup por hardware
-    for target_dir in [target_mod_dir, target_krel_dir]:
-        mod_file = os.path.join(target_dir, "musb_hdrc.ko")
-        if os.path.exists(mod_file):
-            with open(mod_file, "r+b") as f:
+    mod_file = os.path.join(target_krel_dir, "musb_hdrc.ko")
+    if os.path.exists(mod_file):
+        with open(mod_file, "r+b") as f:
+            f.seek(0x18070)
+            curr = f.read(4)
+            if curr == b"\xc8\x01\x00\x34":
                 f.seek(0x18070)
-                curr = f.read(4)
-                if curr == b"\xc8\x01\x00\x34":
-                    f.seek(0x18070)
-                    f.write(b"\x1f\x20\x03\xd5")
-                    print(f"  [+] Parche SOFT_CONN aplicado a {mod_file}")
+                f.write(b"\x1f\x20\x03\xd5")
+                print(f"  [+] Parche SOFT_CONN aplicado a {mod_file}")
 
     for mf in ["modules.alias", "modules.softdep", "modules.load", "modules.load.recovery"]:
         src = os.path.join(vendor_mod_dir, mf)
         if os.path.exists(src):
-            shutil.copy2(src, os.path.join(target_mod_dir, mf))
             shutil.copy2(src, os.path.join(target_krel_dir, mf))
 
     # Guardar lista temprana
     early_list_path = os.path.join(workdir, "lib/modules/modules.early.order")
+
     with open(early_list_path, "w") as f:
         f.write("\n".join(ORDERED_EARLY_MODULES) + "\n")
     print(f"  [+] Lista topológica escrita: {len(ORDERED_EARLY_MODULES)} módulos en {early_list_path}")
@@ -1321,6 +1323,10 @@ if [ -d /sysroot/usr/bin ]; then
     mount -t devpts devpts /sysroot/dev/pts 2>/dev/null || true
     mount -t tmpfs tmpfs /sysroot/run 2>/dev/null || true
     mount -t tmpfs tmpfs /sysroot/tmp 2>/dev/null || true
+    mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
+    mount -t tmpfs -o mode=1777,size=128M shm /dev/shm 2>/dev/null || true
+    mount -t tmpfs -o mode=1777,size=128M shm /sysroot/dev/shm 2>/dev/null || true
+    chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 
     # Base de datos udev para libinput (touch y teclas)
     mkdir -p /sysroot/run/udev/data /run/udev/data
@@ -1520,9 +1526,10 @@ def main():
     stock_vb    = os.path.join(STOCK_DIR, "vendor_boot.img")
     dtb_path    = os.path.join(V13_DIR, "pmos_usb_peripheral.dtb")
     
-    out_rd      = "/tmp/pmos_initramfs_v13.gz"
+    out_rd      = os.path.join(V13_DIR, "pmos_initramfs_v13.gz")
     out_boot    = os.path.join(V13_DIR, "pmos_boot_v13.img")
     out_vb      = os.path.join(V13_DIR, "vendor_boot_pmos_v13.img")
+
 
     print(f"Iniciando compilación de imágenes postmarketOS v13.0 en {V13_DIR}...")
     prepare_initramfs_v9(out_rd)

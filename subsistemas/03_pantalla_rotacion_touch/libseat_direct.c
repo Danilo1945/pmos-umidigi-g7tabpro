@@ -21,6 +21,15 @@
 #ifndef __NR_eventfd2
 #define __NR_eventfd2 19
 #endif
+#ifndef __NR_ioctl
+#define __NR_ioctl 29
+#endif
+
+#ifndef DRM_IOCTL_BASE
+#define DRM_IOCTL_BASE 'd'
+#endif
+#define DRM_IO(n) ((unsigned long)(((0UL) << 30) | ((DRM_IOCTL_BASE) << 8) | ((n) << 0) | ((0UL) << 16)))
+#define DRM_IOCTL_SET_MASTER DRM_IO(0x1e)
 
 static inline long my_sys_close(int fd) {
     register long x8 __asm__("x8") = __NR_close;
@@ -53,6 +62,15 @@ static inline long my_sys_eventfd2(unsigned int initval, int flags) {
     register long x0 __asm__("x0") = initval;
     register long x1 __asm__("x1") = flags;
     __asm__ __volatile__("svc #0" : "=r"(x0) : "r"(x8), "0"(x0), "r"(x1) : "memory");
+    return x0;
+}
+
+static inline long my_sys_ioctl(int fd, unsigned long request, void *arg) {
+    register long x8 __asm__("x8") = __NR_ioctl;
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = request;
+    register long x2 __asm__("x2") = (long)arg;
+    __asm__ __volatile__("svc #0" : "=r"(x0) : "r"(x8), "0"(x0), "r"(x1), "r"(x2) : "memory");
     return x0;
 }
 
@@ -113,6 +131,13 @@ int libseat_open_device(void *seat, const char *path, int *fd_out) {
         log_msg(path);
         log_msg("\n");
         return -1;
+    }
+    // Convertirse en DRM master para poder hacer modesetting
+    long ret = my_sys_ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+    if (ret < 0) {
+        log_msg("[libseat-direct] ADVERTENCIA: DRM_IOCTL_SET_MASTER fallo (puede ser normal si ya somos master)\n");
+    } else {
+        log_msg("[libseat-direct] DRM master adquirido OK\n");
     }
     *fd_out = fd;
     log_msg("[libseat-direct] Device abierto OK: ");

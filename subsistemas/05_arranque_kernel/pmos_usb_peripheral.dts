@@ -3683,7 +3683,7 @@
 					interrupt-names = "fl_pwr_rdy\0fl_detach\0fl_vbus_ov\0fl_chg_tout\0fl_wdt\0fl_bc12_dn\0fl_aicc_done\0fl_pe_done\0fl_batpro_done\0adc_vbat_mon_ov";
 					io-channels = <0x61 0x01 0x61 0x03 0x61 0x04 0x61 0x05 0x61 0x06 0x61 0x08 0x61 0x02 0x61 0x07>;
 					chg_name = "primary_chg";
-					aicr = <0x1f4>;
+					aicr = <0x7d0>;
 					mivr = <0x1130>;
 					cv = <0x1068>;
 					ichg = <0x7d0>;
@@ -6203,13 +6203,13 @@
 		power_path_support;
 		max_charger_voltage = <0x632ea0>;
 		fast_charge_voltage = <0x2dc6c0>;
-		usb_charger_current = <0x7a120>;
+		usb_charger_current = <0x1e8480>;
 		ac_charger_current = <0x1f47d0>;
 		ac_charger_input_current = <0x1f47d0>;
-		non_std_ac_charger_current = <0x7a120>;
-		charging_host_charger_current = <0x16e360>;
+		non_std_ac_charger_current = <0x1e8480>;
+		charging_host_charger_current = <0x1e8480>;
 		ta_ac_charger_current = <0x2dc6c0>;
-		pd_charger_current = <0x7a120>;
+		pd_charger_current = <0x1e8480>;
 		temp_t4_threshold = <0x32>;
 		temp_t3_threshold = <0x2d>;
 		temp_t1_threshold = <0x00>;
@@ -6386,7 +6386,7 @@
 		min_charge_temp_plus_x_degree = <0x06>;
 		max_charge_temp = <0x37>;
 		max_charge_temp_minus_x_degree = <0x32>;
-		usb_charger_current = <0x7a120>;
+		usb_charger_current = <0x1e8480>;
 		ac_charger_current = <0x2dc6c0>;
 		ac_charger_input_current = <0x2dc6c0>;
 		charging_host_charger_current = <0x16e360>;
