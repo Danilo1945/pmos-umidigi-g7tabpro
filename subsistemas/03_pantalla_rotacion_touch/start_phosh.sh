@@ -94,6 +94,14 @@ if ! pgrep -x squeekboard >/dev/null; then
     squeekboard > /var/log/squeekboard.log 2>&1 &
 fi
 
+# Habilitar botón de Suspender en el menú de Phosh
+HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
+
+# Iniciar daemon de botón Power (bloqueo/reposo), volumen y rotación
+if ! pgrep -f tablet_power_daemon.py >/dev/null; then
+    python3 -u /usr/bin/tablet_power_daemon.py > /var/log/tablet_power.log 2>&1 &
+fi
+
 # Supervisor loop con dbus-run-session (session bus para compositor y shell)
 while true; do
     rm -f $XDG_RUNTIME_DIR/wayland-*

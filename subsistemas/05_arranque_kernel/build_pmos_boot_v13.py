@@ -512,6 +512,13 @@ fi
         os.chmod(os.path.join(workdir, "bin", "tablet_audio_daemon.py"), 0o755)
         print(f"  [+] tablet_audio_daemon.py instalado en initramfs")
 
+    pwr_daemon_src = "/home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES/subsistemas/03_pantalla_rotacion_touch/tablet_power_daemon.py"
+    if os.path.exists(pwr_daemon_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(pwr_daemon_src, os.path.join(workdir, "bin", "tablet_power_daemon.py"))
+        os.chmod(os.path.join(workdir, "bin", "tablet_power_daemon.py"), 0o755)
+        print(f"  [+] tablet_power_daemon.py instalado en initramfs")
+
     alsa_conf_src = os.path.join(v13_dir, "50-alsa-fix.conf")
     if os.path.exists(alsa_conf_src):
         os.makedirs(os.path.join(workdir, "etc", "wireplumber"), exist_ok=True)
@@ -608,7 +615,9 @@ cp -f /bin/start_plasma_mobile.sh /sysroot/usr/bin/start_plasma_mobile.sh 2>/dev
 cp -f /bin/backlight_guard /sysroot/usr/bin/backlight_guard 2>/dev/null || true
 cp -f /bin/backlight_guard /sysroot/bin/backlight_guard 2>/dev/null || true
 cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
-chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
+cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
+cp -f /bin/tablet_power_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
+chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
 mknod /sysroot/dev/mali0 c 10 116 2>/dev/null || true
 chmod 666 /sysroot/dev/mali0 2>/dev/null || true
 

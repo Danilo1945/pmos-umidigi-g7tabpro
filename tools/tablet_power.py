@@ -81,27 +81,29 @@ def cmd_sleep():
     cmd = (
         "echo 0 > /sys/class/leds/lcd-backlight/brightness; "
         "for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo powersave > $g 2>/dev/null; done; "
-        "echo '[+] Pantalla apagada (brillo 0) y CPUs en modo powersave.' > /dev/kmsg; "
+        "chroot /sysroot python3 -c 'import os, glob; [os.environ.update({\"DBUS_SESSION_BUS_ADDRESS\": l.split(\"=\",1)[1]}) for p in glob.glob(\"/proc/[0-9]*/environ\") for l in open(p,\"rb\").read().decode(\"latin1\").split(\"\\0\") if l.startswith(\"DBUS_SESSION_BUS_ADDRESS=\")]; from gi.repository import Gio; Gio.DBusProxy.new_sync(Gio.bus_get_sync(Gio.BusType.SESSION, None), Gio.DBusProxyFlags.NONE, None, \"org.gnome.ScreenSaver\", \"/org/gnome/ScreenSaver\", \"org.gnome.ScreenSaver\", None).Lock()' 2>/dev/null; "
+        "echo '[+] Pantalla apagada (brillo 0), CPUs en modo powersave y sesión bloqueada.' > /dev/kmsg; "
         "echo 'OK_SLEEP'"
     )
     res = run_cmd(cmd)
     print(f"✅ {res}")
     print("💡 La pantalla se ha apagado por completo y las CPUs están a frecuencia mínima.")
     print("🔋 El consumo de corriente se reduce a < 80mA (dura más de 60 horas en reposo).")
-    print("👉 Para despertar la pantalla cuando regreses, usa: python3 tools/tablet_power.py wake")
+    print("👉 Para despertar la pantalla, pulsa el botón Power físico o ejecuta: python3 tools/tablet_power.py wake")
 
 def cmd_wake():
     print("[*] Despertando la tablet y reactivando la pantalla...")
     cmd = (
         "for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo schedutil > $g 2>/dev/null; done; "
-        "echo 70 > /sys/class/leds/lcd-backlight/brightness; "
-        "chmod 444 /sys/class/leds/lcd-backlight/brightness; "
-        "echo '[+] Pantalla reactivada (brillo 70) y CPUs en modo schedutil.' > /dev/kmsg; "
+        "echo 200 > /sys/class/leds/lcd-backlight/brightness; "
+        "chroot /sysroot /bin/sh -c 'WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root wlr-randr --output DSI-1 --on --transform 180 2>/dev/null'; "
+        "chroot /sysroot python3 -c 'import os, glob; [os.environ.update({\"DBUS_SESSION_BUS_ADDRESS\": l.split(\"=\",1)[1]}) for p in glob.glob(\"/proc/[0-9]*/environ\") for l in open(p,\"rb\").read().decode(\"latin1\").split(\"\\0\") if l.startswith(\"DBUS_SESSION_BUS_ADDRESS=\")]; from gi.repository import Gio; Gio.DBusProxy.new_sync(Gio.bus_get_sync(Gio.BusType.SESSION, None), Gio.DBusProxyFlags.NONE, None, \"org.gnome.ScreenSaver\", \"/org/gnome/ScreenSaver\", \"org.gnome.ScreenSaver\", None).SetActive(\"(b)\", False)' 2>/dev/null; "
+        "echo '[+] Pantalla reactivada (brillo 200) y CPUs en modo schedutil.' > /dev/kmsg; "
         "echo 'OK_WAKE'"
     )
     res = run_cmd(cmd)
     print(f"✅ {res}")
-    print("💡 Pantalla encendida al 70% (180/255) y rendimiento normal restaurado.")
+    print("💡 Pantalla encendida al nivel óptimo (200/255) y Phosh lockscreen mostrado.")
 
 def cmd_suspend():
     print("[*] Enviando señal de suspensión Suspend-to-RAM (mem)...")
