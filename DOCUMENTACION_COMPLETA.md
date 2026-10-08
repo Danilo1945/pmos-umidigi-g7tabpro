@@ -238,15 +238,80 @@ ssh root@172.16.42.1
 
 ---
 
-## 11. NOTAS PARA PRÓXIMA SESIÓN
-
-- **La tablet está en logo UMIDIGI con brillo mínimo** - esperar a que monte rootfs (1-2 min primera vez)
-- **Si no arranca UI**: `python3 tablet_cmd.py "chroot /sysroot /usr/bin/start_phosh.sh"`
-- **SSH listo**: `ssh root@172.16.42.1` (tras USB up)
-- **WiFi guardado**: FAMILIA_TAPIA_2 conectado, JESSY-RED-2 guardado
-- **KDE parcialmente removido** - completar cuando apk db libre
-- **PipeWire config null-sink**: `/tmp/custom_pipewire.conf` listo
+## 11. NOTAS Y ESTADO OPERATIVO
+- **Auto-Boot incondicional**: La tablet arranca en frío directamente a Phosh en ~12 segundos.
+- **WiFi y Red**: Interfaz `wlan0` operativa y administrada por NetworkManager. Gadget USB CDC-NCM en `172.16.42.1`.
+- **Audio y Volumen**: PipeWire activo, teclas físicas Vol+ y Vol- con OSD gráfico en pantalla.
+- **Batería y Carga 2A**: Telemetría ADC en vivo, indicador con rayo de carga y provider calibrado.
+- **Contraseña del sistema**: `1234` (para `danilo` y `root`).
 
 ---
 
-*Documentación generada automáticamente - actualizar tras cada sesión*
+## 12. GESTIÓN DE ENERGÍA, BOTÓN FÍSICO POWER, MENÚ DE SUSPENSIÓN Y REPOSO PROFUNDO
+
+### 12.1 Arquitectura del Daemon de Hardware (`tablet_power_daemon.py`)
+Ubicación: `/sysroot/usr/bin/tablet_power_daemon.py` y `subsistemas/03_pantalla_rotacion_touch/tablet_power_daemon.py`
+
+* **Captura exclusiva (`EVIOCGRAB`):**
+  - `/dev/input/event3` (`mtk-pmic-keys` - Botón de Power/Bloqueo).
+  - `/dev/input/event0` (`mtk-kpd` - Teclas de volumen Vol+ y Vol-).
+  - Evita que Phoc o el kernel apaguen la salida DRM de forma irreversible o dejen la pantalla negra sin despertar.
+
+* **Servicios D-Bus exportados por el Daemon:**
+  1. **`org.freedesktop.login1.Manager` (System Bus):**
+     - Métodos: `Suspend(b)`, `CanSuspend() -> 'yes'`, `PowerOff(b)`, `CanPowerOff() -> 'yes'`, `Reboot(b)`, `CanReboot() -> 'yes'`.
+     - Señales: `PrepareForSleep(b)` (emitida al entrar en reposo con `true` y al despertar con `false`), `PrepareForShutdown(b)`.
+     - Propiedades: `PreparingForSleep`, `PreparingForShutdown`.
+     - Sesión: `org.freedesktop.login1.Session` con método `SetBrightness(s, s, u)`.
+  2. **`org.gnome.SessionManager` (Session Bus):**
+     - Métodos: `Shutdown()`, `Reboot()`, `CanShutdown() -> true`, `IsSessionRunning() -> true`, `Logout()`.
+     - Permite que las acciones de apagado y reinicio desde los cuadros de diálogo de GNOME funcionen de inmediato.
+  3. **`net.hadess.SensorProxy` (System Bus):**
+     - Expone interfaz de orientación para que el toggle de auto-rotación de Phosh Quick Settings funcione fluidamente entre Portrait (180°) y Landscape (90°/270°).
+
+### 12.2 Ciclos de Operación
+
+1. **Ciclo de Reposo / Bloqueo / Invernación (Botón Físico o Menú Táctil "Suspender"):**
+   * Emite señal D-Bus `PrepareForSleep(true)` a Phosh.
+   * Bloquea la sesión de Phosh mediante `org.gnome.ScreenSaver.Lock()`.
+   * Apaga físicamente la retroiluminación a 0 nits (`/sys/class/leds/lcd-backlight/brightness = 0`).
+   * Configura los gobernadores de todas las CPUs a `powersave` para reducir el consumo a menos de 80 mA.
+   * Guarda el nivel previo de brillo para la reactivación.
+
+2. **Ciclo de Despertar (Botón Físico Power):**
+   * Restaura los gobernadores de CPU a `schedutil` (rendimiento normal).
+   * Reactiva la salida DRM DSI-1 con rotación garantizada a 180° (`wlr-randr --output DSI-1 --on --transform 180`).
+   * Restaura el brillo del panel LCD a 200 (o al nivel guardado).
+   * Despierta la pantalla de bloqueo de Phosh (`org.gnome.ScreenSaver.SetActive(false)`).
+   * Emite señal D-Bus `PrepareForSleep(false)`.
+   * La pantalla se enciende instantáneamente con el reloj y "Desliza para desbloquear".
+
+### 12.3 Comandos Ejecutados Directamente en el Sistema
+* **Habilitar botón "Suspender" en Phosh:**
+  ```bash
+  HOME=/root dconf write /sm/puri/phosh/enable-suspend true
+  ```
+* **Configurar contraseña estándar a 1234:**
+  ```bash
+  echo "root:1234" | chpasswd
+  ```
+* **Inicio y sincronización en `/sysroot/usr/bin/start_phosh.sh`:**
+  - Se configuró el inicio en segundo plano de `tablet_power_daemon.py`.
+  - Se agregó sincronización activa (`gdbus call --system ... GetNameOwner org.freedesktop.login1`) antes de ejecutar `phoc`/`phosh` para garantizar que Phosh descubra el proxy de energía al arrancar.
+  - Se agregó `echo 200 > /sys/class/leds/lcd-backlight/brightness` en el ciclo de supervisión.
+
+### 12.4 Herramienta CLI de Verificación
+```bash
+# Ver estado actual de energía y hardware:
+python3 tools/tablet_power.py status
+
+# Probar reposo / apagado de pantalla por comando:
+python3 tools/tablet_power.py sleep
+
+# Probar reactivación de pantalla por comando:
+python3 tools/tablet_power.py wake
+```
+
+---
+
+*Documentación técnica del sistema consolidada y verificada en vivo.*

@@ -100,11 +100,19 @@ HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 # Iniciar daemon de botón Power (bloqueo/reposo), volumen y rotación
 if ! pgrep -f tablet_power_daemon.py >/dev/null; then
     python3 -u /usr/bin/tablet_power_daemon.py > /var/log/tablet_power.log 2>&1 &
+    # Esperar hasta que org.freedesktop.login1 esté listo en D-Bus
+    for i in $(seq 1 30); do
+        if gdbus call --system --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.freedesktop.login1 >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
 fi
 
 # Supervisor loop con dbus-run-session (session bus para compositor y shell)
 while true; do
     rm -f $XDG_RUNTIME_DIR/wayland-*
+    echo 200 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
     dbus-run-session -- /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/libexec/phosh -U" > /var/log/phosh.log 2>&1
     sleep 3
 done

@@ -31,6 +31,7 @@ last_power_press_time = 0.0
 
 current_sensor_orientation = "bottom-up"
 sensor_dbus_conn = None
+login1_dbus_conn = None
 
 def get_session_dbus_address():
     if "DBUS_SESSION_BUS_ADDRESS" in os.environ and os.environ["DBUS_SESSION_BUS_ADDRESS"]:
@@ -112,11 +113,21 @@ def ensure_desired_orientation():
         pass
 
 def sleep_tablet():
-    global is_screen_on, saved_backlight_level
+    global is_screen_on, saved_backlight_level, login1_dbus_conn
     print("[*] Reposo/Bloqueo activado: apagando pantalla y ahorrando energía...", flush=True)
     cur = get_current_backlight()
     if cur > 10:
         saved_backlight_level = cur
+
+    if login1_dbus_conn:
+        try:
+            from gi.repository import GLib
+            login1_dbus_conn.emit_signal(
+                None, '/org/freedesktop/login1', 'org.freedesktop.login1.Manager',
+                'PrepareForSleep', GLib.Variant('(b)', (True,))
+            )
+        except Exception:
+            pass
 
     # 1. Bloquear sesión de Phosh
     lock_screen()
@@ -131,7 +142,7 @@ def sleep_tablet():
     print("[*] Tablet en reposo: pantalla 0 nits, CPUs en powersave.", flush=True)
 
 def wake_tablet():
-    global is_screen_on, saved_backlight_level
+    global is_screen_on, saved_backlight_level, login1_dbus_conn
     print("[*] Despertando tablet: reactivando pantalla y rendimiento...", flush=True)
     # 1. Restaurar CPUs a schedutil
     set_cpu_governors("schedutil")
@@ -145,6 +156,16 @@ def wake_tablet():
 
     # 4. Despertar lockscreen
     wake_screen()
+
+    if login1_dbus_conn:
+        try:
+            from gi.repository import GLib
+            login1_dbus_conn.emit_signal(
+                None, '/org/freedesktop/login1', 'org.freedesktop.login1.Manager',
+                'PrepareForSleep', GLib.Variant('(b)', (False,))
+            )
+        except Exception:
+            pass
 
     is_screen_on = True
     print(f"[*] Tablet activa: pantalla a brillo {target_b}, Phosh lockscreen mostrado.", flush=True)
@@ -198,6 +219,7 @@ def adjust_volume(up=True):
         print(f"[-] Error ajustando volumen: {e}", flush=True)
 
 def start_dbus_services():
+    global login1_dbus_conn
     get_session_dbus_address()
     from gi.repository import Gio, GLib
 
@@ -233,6 +255,14 @@ def start_dbus_services():
         <method name="Reboot">
           <arg type="b" name="interactive" direction="in"/>
         </method>
+        <signal name="PrepareForSleep">
+          <arg type="b" name="start"/>
+        </signal>
+        <signal name="PrepareForShutdown">
+          <arg type="b" name="start"/>
+        </signal>
+        <property name="PreparingForSleep" type="b" access="read"/>
+        <property name="PreparingForShutdown" type="b" access="read"/>
       </interface>
     </node>
     '''
@@ -256,18 +286,30 @@ def start_dbus_services():
         elif method == "CanReboot":
             invocation.return_value(GLib.Variant('(s)', ('yes',)))
         elif method == "Suspend":
+            print("[*] DBus login1.Manager.Suspend llamado desde la GUI de Phosh!", flush=True)
             sleep_tablet()
             invocation.return_value(None)
         elif method == "PowerOff":
+            print("[*] DBus login1.Manager.PowerOff llamado!", flush=True)
             subprocess.call("sync; poweroff", shell=True)
             invocation.return_value(None)
         elif method == "Reboot":
+            print("[*] DBus login1.Manager.Reboot llamado!", flush=True)
             subprocess.call("sync; reboot", shell=True)
             invocation.return_value(None)
         else:
             invocation.return_value(None)
 
+    def handle_login1_get_prop(conn, sender, path, iface, prop):
+        if prop == "PreparingForSleep":
+            return GLib.Variant('b', not is_screen_on)
+        elif prop == "PreparingForShutdown":
+            return GLib.Variant('b', False)
+        return None
+
     def on_system_bus_acquired(conn, name):
+        global login1_dbus_conn
+        login1_dbus_conn = conn
         conn.register_object(
             '/org/freedesktop/login1/session/auto',
             node_info.interfaces[0],
@@ -281,7 +323,9 @@ def start_dbus_services():
         conn.register_object(
             '/org/freedesktop/login1',
             node_info.interfaces[1],
-            handle_login1_method, None, None
+            handle_login1_method,
+            handle_login1_get_prop,
+            None
         )
 
     # 2. net.hadess.SensorProxy para rotación en Phosh
@@ -359,6 +403,55 @@ def start_dbus_services():
     except Exception as e:
         print(f"[-] Error registrando net.hadess.SensorProxy: {e}", flush=True)
 
+    # 3. org.gnome.SessionManager en el Session Bus
+    SESSION_XML = '''
+    <node>
+      <interface name="org.gnome.SessionManager">
+        <method name="Shutdown"/>
+        <method name="Reboot"/>
+        <method name="CanShutdown">
+          <arg type="b" name="result" direction="out"/>
+        </method>
+        <method name="IsSessionRunning">
+          <arg type="b" name="result" direction="out"/>
+        </method>
+        <method name="Logout">
+          <arg type="u" name="mode" direction="in"/>
+        </method>
+      </interface>
+    </node>
+    '''
+    session_node_info = Gio.DBusNodeInfo.new_for_xml(SESSION_XML)
+
+    def handle_session_method(conn, sender, path, iface, method, params, invocation):
+        if method == "Shutdown":
+            print("[*] SessionManager.Shutdown llamado!", flush=True)
+            subprocess.call("sync; poweroff", shell=True)
+            invocation.return_value(None)
+        elif method == "Reboot":
+            print("[*] SessionManager.Reboot llamado!", flush=True)
+            subprocess.call("sync; reboot", shell=True)
+            invocation.return_value(None)
+        elif method == "CanShutdown":
+            invocation.return_value(GLib.Variant('(b)', (True,)))
+        elif method == "IsSessionRunning":
+            invocation.return_value(GLib.Variant('(b)', (True,)))
+        else:
+            invocation.return_value(None)
+
+    def on_session_bus_acquired(conn, name):
+        conn.register_object(
+            '/org/gnome/SessionManager',
+            session_node_info.interfaces[0],
+            handle_session_method, None, None
+        )
+
+    try:
+        Gio.bus_own_name(Gio.BusType.SESSION, 'org.gnome.SessionManager', Gio.BusNameOwnerFlags.NONE, on_session_bus_acquired, None, None)
+    except Exception as e:
+        print(f"[-] Error registrando org.gnome.SessionManager: {e}", flush=True)
+
+    # 4. Listener de desbloqueo para mantener 180°
     def on_screensaver_signal(conn, sender, path, iface, signal, params):
         if signal == "ActiveChanged":
             is_active = params.unpack()[0]
