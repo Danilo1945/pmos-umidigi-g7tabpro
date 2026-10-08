@@ -2,7 +2,7 @@
 ## UMIDIGI G7 Tab Pro (`TG2403GBA`) - SoC MediaTek Helio G99 (`MT6789`)
 ### postmarketOS Edge (Kernel 5.10.185-pmos aarch64 - Alpine Linux musl)
 
-**Versión:** v13.1 Estable  
+**Versión:** v15.0 Estable  
 **Fecha de Actualización:** 2026-10-08  
 **Estado General:** 100% Operativo (Auto-boot en frío, Phosh Wayland, Touch, Audio 4x AW87359, WiFi WMT, Batería 2A con telemetría en vivo, Botón físico de bloqueo/energía, Menú de suspensión D-Bus login1 y GPU Mali-G57 activa).
 
@@ -26,7 +26,7 @@
 
 ---
 
-## 2. ARQUITECTURA DE ARRANQUE INCONDICIONAL (AUTO-BOOT v13)
+## 2. ARQUITECTURA DE ARRANQUE INCONDICIONAL (AUTO-BOOT v15)
 
 La tablet inicia en frío automáticamente en **~12 segundos** directo al entorno de escritorio Phosh sin requerir intervención manual ni comandos externos.
 
@@ -37,7 +37,7 @@ La tablet inicia en frío automáticamente en **~12 segundos** directo al entorn
        [ Little Kernel (LK / BROM) ]
                      │
                      ▼
-  [ Particiones boot_a/b + vendor_boot_a/b (v13) ]
+  [ Particiones boot_a/b + vendor_boot_a/b (v15) ]
                      │
                      ▼
  [ Host Initramfs: Busybox ash /init (PID 1) ]
@@ -65,14 +65,17 @@ La tablet inicia en frío automáticamente en **~12 segundos** directo al entorn
 
 ### Imágenes de Arranque Flasheadas Persistentes
 Las imágenes compiladas se encuentran grabadas de forma idéntica en ambos slots A y B para evitar cualquier caída por rollback:
-- **`pmos_boot_v13.img`** (Flasheado en `/dev/sdc28` [boot_a] y `/dev/sdc51` [boot_b])  
-  *SHA-256:* `bb20688ae8f55fe49d7d9a180855aea67709360ad7837032b726a348c92f9ea1`
-- **`vendor_boot_pmos_v13.img`** (Flasheado en `/dev/sdc29` [vendor_boot_a] y `/dev/sdc52` [vendor_boot_b])  
-  *SHA-256:* `e3f8b9f390b0ec04d1a0faf991896c26ba413b1dbc54b5fe49f7fba5419d8500`
+- **`pmos_boot_v15.img`** (Flasheado en `/dev/sdc28` [boot_a] y `/dev/sdc51` [boot_b])  
+  *MD5:* `94c30b53a81497230bf510862905f692`  
+  *SHA-256:* `d2562264a7b2fc363d179093f5578bd3a4b4177caf75091c2e214272dc605eb7`
+- **`vendor_boot_pmos_v15.img`** (Flasheado en `/dev/sdc29` [vendor_boot_a] y `/dev/sdc52` [vendor_boot_b])  
+  *MD5:* `3598d7eb387379b8f4abf8c3247646b6`  
+  *SHA-256:* `9d7fcee90b3f3ecadde36a522d15aeac0135d26f047b83cd463aa65189ef8dee`
+- **Respaldo de Configuración Rootfs:** `sysroot_v15_config_backup.tar.gz` (201.5 MB) en `version_v15_estable/`
 
 Para regenerar las imágenes en cualquier momento:
 ```bash
-python3 subsistemas/05_arranque_kernel/build_pmos_boot_v13.py
+python3 subsistemas/05_arranque_kernel/build_pmos_boot_v15.py
 ```
 
 ---
@@ -185,9 +188,13 @@ python3 tools/tablet_cmd.py "chroot /sysroot /usr/bin/nmcli device wifi connect 
 python3 tools/tablet_cmd.py "sync; reboot -f"
 ```
 
-### 6.3 Restauración Inmediata en Caliente (1-Click Restore)
-Si en el futuro se experimenta con algún paquete o configuración y se requiere restaurar los daemons y configuraciones estables de audio, pantalla, batería y Wi-Fi en caliente:
+### 6.3 Restauración Inmediata y Punto de Retorno (1-Click Restore v15.0)
+Si en el futuro se experimenta con algún paquete, kernel o configuración y se requiere restaurar la tablet completa (imágenes de arranque + estado y configuraciones del sistema en `/sysroot`):
 ```bash
+# Restauración completa (flasheo de boot v15 + restauración de configs de sysroot):
+python3 tools/restaurar_tablet_v15.py
+
+# Restauración rápida en caliente solo de daemons:
 python3 tools/restore_live_tablet.py
 ```
 

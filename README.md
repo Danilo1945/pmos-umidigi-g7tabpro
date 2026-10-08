@@ -2,7 +2,7 @@
 ## UMIDIGI G7 Tab Pro (`TG2403GBA`) - SoC MediaTek Helio G99 (`MT6789`)
 ### postmarketOS Edge (Alpine Linux aarch64 - Kernel 5.10.185-pmos)
 
-**Versión:** v13.1 Estable | **Documentación Técnica Principal:** [`DOCUMENTACION_COMPLETA.md`](./DOCUMENTACION_COMPLETA.md)
+**Versión:** v15.0 Estable | **Documentación Técnica Principal:** [`DOCUMENTACION_COMPLETA.md`](./DOCUMENTACION_COMPLETA.md)
 
 ---
 
