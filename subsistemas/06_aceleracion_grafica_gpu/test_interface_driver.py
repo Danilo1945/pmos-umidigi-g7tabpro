@@ -20,13 +20,31 @@ def main():
     print("==========================================================================")
 
     # Intentar cargar en el espacio de procesos el driver de interfaz
-    driver_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "libgpu_interface_driver.so"))
-    if not os.path.exists(driver_path):
-        print(f"[!] Error: No se encontró el binario compilado en {driver_path}")
+    possible_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "libgpu_interface_driver.so")),
+        "/usr/lib/libgpu_interface_driver.so",
+        "/sysroot/usr/lib/libgpu_interface_driver.so",
+        "/tmp/libgpu_interface_driver.so"
+    ]
+    driver_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            driver_path = p
+            break
+
+    if not driver_path:
+        print(f"[!] Error: No se encontró el binario compilado en {possible_paths}")
         return 1
 
     try:
-        # Cargar dependencias y el driver
+        # Precargar libmali y libstdc++ si existen para resolver RTLD_NEXT
+        for dep in ["/usr/lib/libstdc++.so.6", "/usr/lib/libmali-bifrost.so"]:
+            if os.path.exists(dep):
+                try:
+                    ctypes.CDLL(dep, mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
+        # Cargar el driver
         drv = ctypes.CDLL(driver_path, mode=ctypes.RTLD_GLOBAL)
         print(f"[OK] Driver cargado en memoria: {driver_path}")
     except Exception as e:

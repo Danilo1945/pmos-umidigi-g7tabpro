@@ -1,6 +1,6 @@
 CROSS_COMPILE ?= aarch64-linux-gnu-
 CC = $(CROSS_COMPILE)gcc
-CFLAGS ?= -O2 -fPIC -Wall
+CFLAGS ?= -O2 -fPIC -Wall -std=gnu11 -fno-builtin -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 LDFLAGS ?= -shared -lpthread -ldl
 
 TARGETS = libgpu_interface_driver.so libmali_shim.so

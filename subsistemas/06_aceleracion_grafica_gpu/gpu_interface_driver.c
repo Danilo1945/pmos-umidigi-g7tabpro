@@ -76,34 +76,85 @@ struct mallinfo2 mallinfo2(void) {
     return m;
 }
 
-long strtol_l(const char *nptr, char **endptr, int base, locale_t loc) {
+long my_strtol_l(const char *nptr, char **endptr, int base, locale_t loc) __asm__("strtol_l");
+long my_strtol_l(const char *nptr, char **endptr, int base, locale_t loc) {
     (void)loc;
     return strtol(nptr, endptr, base);
 }
 
-long long strtoll_l(const char *nptr, char **endptr, int base, locale_t loc) {
+long long my_strtoll_l(const char *nptr, char **endptr, int base, locale_t loc) __asm__("strtoll_l");
+long long my_strtoll_l(const char *nptr, char **endptr, int base, locale_t loc) {
     (void)loc;
     return strtoll(nptr, endptr, base);
 }
 
-unsigned long strtoul_l(const char *nptr, char **endptr, int base, locale_t loc) {
+unsigned long my_strtoul_l(const char *nptr, char **endptr, int base, locale_t loc) __asm__("strtoul_l");
+unsigned long my_strtoul_l(const char *nptr, char **endptr, int base, locale_t loc) {
     (void)loc;
     return strtoul(nptr, endptr, base);
 }
 
-unsigned long long strtoull_l(const char *nptr, char **endptr, int base, locale_t loc) {
+unsigned long long my_strtoull_l(const char *nptr, char **endptr, int base, locale_t loc) __asm__("strtoull_l");
+unsigned long long my_strtoull_l(const char *nptr, char **endptr, int base, locale_t loc) {
     (void)loc;
     return strtoull(nptr, endptr, base);
 }
 
-double strtod_l(const char *nptr, char **endptr, locale_t loc) {
+double my_strtod_l(const char *nptr, char **endptr, locale_t loc) __asm__("strtod_l");
+double my_strtod_l(const char *nptr, char **endptr, locale_t loc) {
     (void)loc;
     return strtod(nptr, endptr);
 }
 
-float strtof_l(const char *nptr, char **endptr, locale_t loc) {
+float my_strtof_l(const char *nptr, char **endptr, locale_t loc) __asm__("strtof_l");
+float my_strtof_l(const char *nptr, char **endptr, locale_t loc) {
     (void)loc;
     return strtof(nptr, endptr);
+}
+
+/* Stubs de compatibilidad ISO C23 para musl libc */
+unsigned long __isoc23_strtoul(const char *nptr, char **endptr, int base) {
+    return strtoul(nptr, endptr, base);
+}
+long __isoc23_strtol(const char *nptr, char **endptr, int base) {
+    return strtol(nptr, endptr, base);
+}
+long long __isoc23_strtoll(const char *nptr, char **endptr, int base) {
+    return strtoll(nptr, endptr, base);
+}
+unsigned long long __isoc23_strtoull(const char *nptr, char **endptr, int base) {
+    return strtoull(nptr, endptr, base);
+}
+double __isoc23_strtod(const char *nptr, char **endptr) {
+    return strtod(nptr, endptr);
+}
+float __isoc23_strtof(const char *nptr, char **endptr) {
+    return strtof(nptr, endptr);
+}
+
+/* Stubs de fortificación glibc para musl libc */
+int __fprintf_chk(FILE *fp, int flag, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int ret = vfprintf(fp, format, ap);
+    va_end(ap);
+    return ret;
+}
+
+int __printf_chk(int flag, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int ret = vprintf(format, ap);
+    va_end(ap);
+    return ret;
+}
+
+int __snprintf_chk(char *str, size_t maxlen, int flag, size_t slen, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int ret = vsnprintf(str, maxlen, format, ap);
+    va_end(ap);
+    return ret;
 }
 
 /* ========================================================================= */
