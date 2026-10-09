@@ -41,7 +41,16 @@ scale=1.0
 rotate=180
 PHOCEOF
 
-# Entorno: root, XDG_RUNTIME_DIR=/tmp/runtime-root, Pixman
+# Inicialización del subsistema GPU Mali-G57 y protección OPP 37
+if [ -x /usr/bin/load_mali_chain.sh ]; then
+    sh /usr/bin/load_mali_chain.sh 2>&1 || true
+fi
+if [ -e /proc/gpufreqv2/fix_target_opp_index ]; then
+    echo 37 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
+fi
+chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
+
+# Entorno: root, XDG_RUNTIME_DIR=/tmp/runtime-root, GPU Aceleración GLES2
 mkdir -p /tmp/runtime-root
 chmod 700 /tmp/runtime-root
 
@@ -52,10 +61,18 @@ export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 export WLR_BACKENDS=drm,libinput
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
-export WLR_RENDERER=pixman
-export WLR_RENDERER_ALLOW_SOFTWARE=1
-export LP_NUM_THREADS=4
-export LD_PRELOAD=/usr/lib/libseat_direct.so
+
+# Configuración de aceleración por GPU con libgpu_interface_driver
+if [ -f /usr/lib/libgpu_interface_driver.so ] && [ -f /usr/lib/libmali-bifrost.so ]; then
+    export WLR_RENDERER=gles2
+    export LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.6 /usr/lib/libgpu_interface_driver.so /usr/lib/libmali-bifrost.so /usr/lib/libseat_direct.so"
+else
+    export WLR_RENDERER=pixman
+    export WLR_RENDERER_ALLOW_SOFTWARE=1
+    export LP_NUM_THREADS=4
+    export LD_PRELOAD=/usr/lib/libseat_direct.so
+fi
+
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
 export SDL_VIDEODRIVER=wayland

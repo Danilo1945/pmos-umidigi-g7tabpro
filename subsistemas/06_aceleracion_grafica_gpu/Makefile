@@ -3,13 +3,17 @@ CC = $(CROSS_COMPILE)gcc
 CFLAGS ?= -O2 -fPIC -Wall
 LDFLAGS ?= -shared -lpthread -ldl
 
-all: libmali_shim.so
+TARGETS = libgpu_interface_driver.so libmali_shim.so
+
+all: $(TARGETS)
+
+libgpu_interface_driver.so: gpu_interface_driver.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 libmali_shim.so: libmali_shim.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 clean:
-	rm -f libmali_shim.so
+	rm -f $(TARGETS)
 
 .PHONY: all clean
-
