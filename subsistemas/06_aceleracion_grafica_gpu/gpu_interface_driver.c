@@ -58,10 +58,20 @@ int fcntl64(int fd, int cmd, ...) {
     return fcntl(fd, cmd, arg);
 }
 
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void)) {
+    (void)prepare;
+    (void)parent;
+    (void)child;
+    return 0;
+}
+
 int __register_atfork(void (*prepare)(void), void (*parent)(void),
                       void (*child)(void), void *dso_handle) {
+    (void)prepare;
+    (void)parent;
+    (void)child;
     (void)dso_handle;
-    return pthread_atfork(prepare, parent, child);
+    return 0;
 }
 
 struct mallinfo { int a; };
@@ -133,7 +143,25 @@ float __isoc23_strtof(const char *nptr, char **endptr) {
 }
 
 /* Stubs de fortificación glibc para musl libc */
+int __vfprintf_chk(FILE *fp, int flag, const char *format, va_list ap) {
+    (void)flag;
+    return vfprintf(fp, format, ap);
+}
+
+int __vsnprintf_chk(char *str, size_t maxlen, int flag, size_t slen, const char *format, va_list ap) {
+    (void)flag;
+    (void)slen;
+    return vsnprintf(str, maxlen, format, ap);
+}
+
+int __vsprintf_chk(char *str, int flag, size_t slen, const char *format, va_list ap) {
+    (void)flag;
+    (void)slen;
+    return vsprintf(str, format, ap);
+}
+
 int __fprintf_chk(FILE *fp, int flag, const char *format, ...) {
+    (void)flag;
     va_list ap;
     va_start(ap, format);
     int ret = vfprintf(fp, format, ap);
@@ -142,6 +170,7 @@ int __fprintf_chk(FILE *fp, int flag, const char *format, ...) {
 }
 
 int __printf_chk(int flag, const char *format, ...) {
+    (void)flag;
     va_list ap;
     va_start(ap, format);
     int ret = vprintf(format, ap);
@@ -150,9 +179,21 @@ int __printf_chk(int flag, const char *format, ...) {
 }
 
 int __snprintf_chk(char *str, size_t maxlen, int flag, size_t slen, const char *format, ...) {
+    (void)flag;
+    (void)slen;
     va_list ap;
     va_start(ap, format);
     int ret = vsnprintf(str, maxlen, format, ap);
+    va_end(ap);
+    return ret;
+}
+
+int __sprintf_chk(char *str, int flag, size_t slen, const char *format, ...) {
+    (void)flag;
+    (void)slen;
+    va_list ap;
+    va_start(ap, format);
+    int ret = vsprintf(str, format, ap);
     va_end(ap);
     return ret;
 }
@@ -265,7 +306,18 @@ static void init_gbm_symbols(void) {
     if (initialized) return;
     initialized = 1;
 
-    #define BIND_GBM(sym) real_##sym = dlsym(RTLD_NEXT, #sym)
+    void *mali_handle = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+    if (!mali_handle) {
+        mali_handle = dlopen("/usr/lib/libmali.so", RTLD_LAZY | RTLD_GLOBAL);
+    }
+
+    #define BIND_GBM(sym) do { \
+        real_##sym = dlsym(RTLD_NEXT, #sym); \
+        if (!real_##sym && mali_handle) { \
+            real_##sym = dlsym(mali_handle, #sym); \
+        } \
+    } while (0)
+
     BIND_GBM(gbm_create_device);
     BIND_GBM(gbm_device_destroy);
     BIND_GBM(gbm_bo_create);

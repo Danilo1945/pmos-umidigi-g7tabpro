@@ -130,6 +130,16 @@ fi
 while true; do
     rm -f $XDG_RUNTIME_DIR/wayland-*
     echo 200 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+    start_time=$(date +%s)
     dbus-run-session -- /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/libexec/phosh -U" > /var/log/phosh.log 2>&1
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    if [ "$duration" -lt 5 ] && [ "$WLR_RENDERER" = "gles2" ]; then
+        echo "Aviso: Phoc GLES2 finalizó en ${duration}s. Conmutando a fallback seguro Pixman..." >> /var/log/phosh.log
+        export WLR_RENDERER=pixman
+        export WLR_RENDERER_ALLOW_SOFTWARE=1
+        export LP_NUM_THREADS=4
+        export LD_PRELOAD=/usr/lib/libseat_direct.so
+    fi
     sleep 3
 done
