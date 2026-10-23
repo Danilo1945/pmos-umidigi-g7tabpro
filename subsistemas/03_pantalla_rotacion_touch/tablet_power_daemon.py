@@ -26,7 +26,7 @@ KEY_POWER      = 116
 EVIOCGRAB = 0x40044590
 
 is_screen_on = True
-saved_backlight_level = 200
+saved_backlight_level = 15
 last_power_press_time = 0.0
 
 current_sensor_orientation = "bottom-up"
@@ -55,9 +55,11 @@ def get_current_backlight():
             val = int(f.read().strip())
             return val
     except Exception:
-        return 200
+        return 15
 
 def set_backlight_hardware(level):
+    if level < 15 and level != 0:
+        level = 15
     try:
         with open("/sys/class/leds/lcd-backlight/brightness", "w") as f:
             f.write(f"{int(level)}\n")
@@ -151,7 +153,7 @@ def wake_tablet():
     ensure_desired_orientation()
 
     # 3. Restaurar brillo LCD
-    target_b = saved_backlight_level if saved_backlight_level > 20 else 200
+    target_b = saved_backlight_level if saved_backlight_level >= 15 else 15
     set_backlight_hardware(target_b)
 
     # 4. Despertar lockscreen
@@ -290,12 +292,10 @@ def start_dbus_services():
             sleep_tablet()
             invocation.return_value(None)
         elif method == "PowerOff":
-            print("[*] DBus login1.Manager.PowerOff llamado!", flush=True)
-            subprocess.call("sync; poweroff", shell=True)
+            print("[*] DBus login1.Manager.PowerOff llamado (ignorado para estabilidad de depuración)", flush=True)
             invocation.return_value(None)
         elif method == "Reboot":
-            print("[*] DBus login1.Manager.Reboot llamado!", flush=True)
-            subprocess.call("sync; reboot", shell=True)
+            print("[*] DBus login1.Manager.Reboot llamado (ignorado para estabilidad de depuración)", flush=True)
             invocation.return_value(None)
         else:
             invocation.return_value(None)
@@ -425,12 +425,10 @@ def start_dbus_services():
 
     def handle_session_method(conn, sender, path, iface, method, params, invocation):
         if method == "Shutdown":
-            print("[*] SessionManager.Shutdown llamado!", flush=True)
-            subprocess.call("sync; poweroff", shell=True)
+            print("[*] SessionManager.Shutdown recibido (ignorado para estabilidad)", flush=True)
             invocation.return_value(None)
         elif method == "Reboot":
-            print("[*] SessionManager.Reboot llamado!", flush=True)
-            subprocess.call("sync; reboot", shell=True)
+            print("[*] SessionManager.Reboot recibido (ignorado para estabilidad)", flush=True)
             invocation.return_value(None)
         elif method == "CanShutdown":
             invocation.return_value(GLib.Variant('(b)', (True,)))

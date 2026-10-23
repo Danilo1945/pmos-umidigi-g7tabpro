@@ -483,6 +483,30 @@ fi
         shutil.copy2(lsd_src, os.path.join(workdir, "bin", "libseat_direct.so"))
         shutil.copy2(lsd_src, os.path.join(workdir, "lib", "libseat_direct.so"))
         print(f"  [+] libseat_direct.so instalado en initramfs")
+
+    # Driver de Interfaz GPU ARM Mali-G57 MC2 para Wayland/KMS
+    gpu_drv_src = os.path.join(repo_dir, "subsistemas/06_aceleracion_grafica_gpu/libgpu_interface_driver.so")
+    if os.path.exists(gpu_drv_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        os.makedirs(os.path.join(workdir, "lib"), exist_ok=True)
+        shutil.copy2(gpu_drv_src, os.path.join(workdir, "bin", "libgpu_interface_driver.so"))
+        shutil.copy2(gpu_drv_src, os.path.join(workdir, "lib", "libgpu_interface_driver.so"))
+        print(f"  [+] libgpu_interface_driver.so instalado en initramfs")
+
+    # Script de carga de controladores Mali y demonio PWM
+    load_mali_src = os.path.join(repo_dir, "subsistemas/06_aceleracion_grafica_gpu/load_mali_chain.sh")
+    if os.path.exists(load_mali_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(load_mali_src, os.path.join(workdir, "bin", "load_mali_chain.sh"))
+        os.chmod(os.path.join(workdir, "bin", "load_mali_chain.sh"), 0o755)
+        print(f"  [+] load_mali_chain.sh instalado en initramfs")
+
+    pwm_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/panel_pwm_force")
+    if os.path.exists(pwm_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(pwm_src, os.path.join(workdir, "bin", "panel_pwm_force"))
+        os.chmod(os.path.join(workdir, "bin", "panel_pwm_force"), 0o755)
+        print(f"  [+] panel_pwm_force instalado en initramfs")
     
     sph_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/start_phosh.sh")
     if os.path.exists(sph_src):
@@ -497,6 +521,13 @@ fi
         shutil.copy2(bat_daemon_src, os.path.join(workdir, "bin", "battery_daemon"))
         os.chmod(os.path.join(workdir, "bin", "battery_daemon"), 0o755)
         print(f"  [+] battery_daemon instalado en initramfs")
+
+    bat_py_src = os.path.join(repo_dir, "subsistemas/02_bateria_energia/tablet_battery_daemon.py")
+    if os.path.exists(bat_py_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(bat_py_src, os.path.join(workdir, "bin", "tablet_battery_daemon.py"))
+        os.chmod(os.path.join(workdir, "bin", "tablet_battery_daemon.py"), 0o755)
+        print(f"  [+] tablet_battery_daemon.py instalado en initramfs")
 
     phoc_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/phoc.ini")
     if os.path.exists(phoc_src):
@@ -613,10 +644,14 @@ cp -f /bin/wmt_wifi_start.sh /sysroot/usr/bin/wmt_wifi_start.sh 2>/dev/null || t
 cp -f /bin/start_plasma_mobile.sh /sysroot/usr/bin/start_plasma_mobile.sh 2>/dev/null || true
 cp -f /bin/backlight_guard /sysroot/usr/bin/backlight_guard 2>/dev/null || true
 cp -f /bin/backlight_guard /sysroot/bin/backlight_guard 2>/dev/null || true
+cp -f /bin/libseat_direct.so /sysroot/usr/lib/libseat_direct.so 2>/dev/null || true
+cp -f /bin/libgpu_interface_driver.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
+cp -f /bin/load_mali_chain.sh /sysroot/usr/bin/load_mali_chain.sh 2>/dev/null || true
+cp -f /bin/panel_pwm_force /sysroot/usr/bin/panel_pwm_force 2>/dev/null || true
 cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
 cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
 cp -f /bin/tablet_power_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
-chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
+chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/tablet_power_daemon.py /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
 mknod /sysroot/dev/mali0 c 10 116 2>/dev/null || true
 chmod 666 /sysroot/dev/mali0 2>/dev/null || true
 
@@ -923,6 +958,8 @@ resolve_misc() {
 sync_debug_to_misc() {
     local m=$(resolve_misc 2>/dev/null)
     if [ -n "$m" ] && [ -b "$m" ]; then
+        # Limpiar cualquier residuo de boot-recovery en BCB (sector 0)
+        dd if=/dev/zero of="$m" bs=2048 count=1 conv=notrunc 2>/dev/null || true
         dd if="$LOGFILE" of="$m" bs=4096 seek=1 count=4 conv=notrunc 2>/dev/null || true
         dmesg | dd of="$m" bs=4096 seek=5 count=110 conv=notrunc 2>/dev/null || true
         sync 2>/dev/null || true
@@ -951,12 +988,15 @@ load_mod() {
     echo "done: $mod" >>"$LOGFILE"
 }
 
-# 1. Watchdog con timeout extendido a 300 segundos y alimentador dual
+# 1. Watchdog con timeout extendido a 300 segundos y alimentador triple redundante
 echo "load: mtk_wdt.ko (timeout=300)" >>"$LOGFILE"
-insmod /lib/modules/mtk_wdt.ko timeout=300 2>>"$LOGFILE" || \
 insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/mtk_wdt.ko timeout=300 2>>"$LOGFILE" || \
+insmod /lib/modules/mtk_wdt.ko timeout=300 2>>"$LOGFILE" || \
 modprobe mtk_wdt timeout=300 2>>"$LOGFILE" || true
 echo "done: mtk_wdt.ko" >>"$LOGFILE"
+mknod /dev/watchdog0 c 10 130 2>/dev/null || true
+mknod /dev/watchdog c 10 130 2>/dev/null || true
+chmod 666 /dev/watchdog* 2>/dev/null || true
 if [ -x /bin/wdt_pet ]; then
     /bin/wdt_pet &
 elif [ -x /sbin/wdt_pet ]; then
@@ -968,7 +1008,7 @@ fi
 (while true; do
     printf "\x01" > /dev/watchdog0 2>/dev/null || true
     printf "\x01" > /dev/watchdog 2>/dev/null || true
-    sleep 0.5
+    sleep 0.2
 done) &
 
 populate_gpio_nodes() {
@@ -1046,7 +1086,20 @@ echo 500 > "$CG/configs/c.1/MaxPower" 2>/dev/null || true
 ln -s "$CG/functions/acm.usb0" "$CG/configs/c.1/acm.usb0" 2>/dev/null || true
 ln -s "$CG/functions/ncm.usb0" "$CG/configs/c.1/ncm.usb0" 2>/dev/null || true
 
-# Vincular al controlador UDC
+# Intento sincrono inmediato de vinculo UDC
+for u in /sys/class/udc/*; do
+    [ -e "$u" ] || continue
+    uname=$(basename "$u")
+    case "$uname" in
+        *dummy*) continue ;;
+        *)
+            echo "$uname" > "$CG/UDC" 2>>"$LOGFILE" && touch /tmp/_gadget_active
+            break
+            ;;
+    esac
+done
+
+# Vincular al controlador UDC (vigilante continuo)
 (
     while true; do
         if [ ! -f /tmp/_gadget_active ]; then
@@ -1238,10 +1291,13 @@ if [ -f /sys/class/drm/card0/dev ]; then
     cp -a /dev/dri/* /sysroot/dev/dri/ 2>/dev/null || true
 fi
 
-# Apagar backlight (0) para maxima velocidad de carga de bateria
+# Encender backlight al minimo + 15 (15) para ahorro critico de bateria
 for b in /sys/class/leds/lcd-backlight/brightness /sys/class/backlight/*/brightness; do
-    [ -f "$b" ] && echo 0 > "$b" 2>/dev/null || true
+    [ -f "$b" ] && echo 15 > "$b" 2>/dev/null || true
 done
+if [ -x /bin/drm_splash ]; then
+    /bin/drm_splash &
+fi
 
 # Preconfigurar KWin Output para panel DSI-1 nativo (1200x1920)
 mkdir -p /sysroot/home/danilo/.config /sysroot/root/.config 2>/dev/null || true
@@ -1381,17 +1437,46 @@ if [ -d /sysroot/usr/bin ]; then
     echo ">> [pmOS-v13] Lanzando sesion de GNOME Mobile (Phosh) supervisada..." > /dev/kmsg
     (
         sleep 2
-        # Instalar libseat_direct, battery_daemon y configs de Phosh
+        # Instalar libseat_direct, libgpu_interface_driver, load_mali_chain, battery_daemon y configs de Phosh
         cp -f /bin/libseat_direct.so /sysroot/usr/lib/libseat_direct.so 2>/dev/null || true
+        cp -f /bin/libgpu_interface_driver.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
+        cp -f /bin/load_mali_chain.sh /sysroot/usr/bin/load_mali_chain.sh 2>/dev/null || true
+        cp -f /bin/panel_pwm_force /sysroot/usr/bin/panel_pwm_force 2>/dev/null || true
+        cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
         cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
         cp -f /bin/battery_daemon /sysroot/usr/bin/battery_daemon 2>/dev/null || true
+        cp -f /bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_battery_daemon.py 2>/dev/null || true
         cp -f /bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
         cp -f /etc/phoc.ini /sysroot/etc/phoc.ini 2>/dev/null || true
         mkdir -p /sysroot/etc/wireplumber/wireplumber.conf.d /sysroot/etc/pipewire/pipewire.conf.d /sysroot/usr/share/alsa-card-profile/mixer/paths
         cp -f /etc/wireplumber/50-alsa-fix.conf /sysroot/etc/wireplumber/wireplumber.conf.d/50-alsa-fix.conf 2>/dev/null || true
         cp -f /etc/pipewire/10-alsa.conf /sysroot/etc/pipewire/pipewire.conf.d/10-alsa.conf 2>/dev/null || true
         cp -f /etc/alsa-card-profile/analog-output-headphones.conf /sysroot/usr/share/alsa-card-profile/mixer/paths/analog-output-headphones.conf 2>/dev/null || true
-        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
+        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
+
+        # Habilitar carga de bateria por hardware con chip MT6375 al encender
+        for m in rtc-mt6397 led_ctrl pd_dbg_info adapter_class charger_class \
+                 mtk_charger_algorithm_class tcpc_class tcpc_mt6375 \
+                 mtk_charger_framework mt6375-charger extcon-mtk-usb \
+                 mtk_pep20 mtk_pep40 mtk_pd_charging mtk_chg_type_det \
+                 mt6358_battery mt635x_auxadc; do
+            modprobe $m 2>/dev/null || \
+            insmod /lib/modules/$m.ko 2>/dev/null || \
+            insmod /usr/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$m.ko 2>/dev/null || \
+            insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$m.ko 2>/dev/null || true
+        done
+        echo 2000000 > /sys/devices/platform/charger/input_current 2>/dev/null || true
+        echo 4 > /sys/devices/platform/charger/chr_type 2>/dev/null || true
+        CHG_DEV="/sys/devices/platform/soc/11017000.i2c/i2c-5/5-0034/11017000.i2c:mt6375@34:chg/power_supply/11017000.i2c:mt6375@34:chg"
+        if [ -d "$CHG_DEV" ]; then
+            echo 1 > $CHG_DEV/online 2>/dev/null || true
+            echo "Charging" > $CHG_DEV/status 2>/dev/null || true
+            echo 2000 > $CHG_DEV/input_current_limit 2>/dev/null || true
+            echo 2000 > $CHG_DEV/constant_charge_current 2>/dev/null || true
+        fi
+        if [ -x /sysroot/usr/bin/python3 ]; then
+            chroot /sysroot /usr/bin/python3 -u /usr/bin/tablet_battery_daemon.py >/sysroot/tmp/battery_daemon.log 2>&1 &
+        fi
 
         mkdir -p /sysroot/etc/dbus-1/system.d
         cat << 'DBUSEOF' > /sysroot/etc/dbus-1/system.d/net.hadess.SensorProxy.conf
@@ -1411,10 +1496,10 @@ DBUSEOF
         # Precalentar udev en sysroot
         chroot /sysroot udevadm trigger --action=add --subsystem-match=input 2>/dev/null || true
         chroot /sysroot udevadm settle --timeout=2 2>/dev/null || true
-        echo ">> [pmOS-v13] Entorno sysroot listo. Levantando sesión UI interactiva Phosh..." > /dev/kmsg
-        if [ -x /bin/start_phosh_service.sh ]; then
-            /bin/start_phosh_service.sh
-        fi
+        echo ">> [pmOS-Sentinel] Entorno sysroot listo y montado con éxito." > /dev/kmsg
+        echo ">> [pmOS-Sentinel] Shell remoto interactivo disponible en 172.16.42.1:2323 y /dev/ttyGS0." > /dev/kmsg
+        echo ">> [pmOS-Sentinel] Para iniciar Phosh manualmente: '/usr/bin/start_phosh_service.sh'" > /dev/kmsg
+        echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
     ) &
 fi
 

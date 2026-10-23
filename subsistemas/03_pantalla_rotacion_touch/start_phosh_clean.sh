@@ -15,14 +15,15 @@ chmod 1777 /dev/shm /sysroot/dev/shm /sysroot/tmp 2>/dev/null || true
 chmod 700 /sysroot/tmp/runtime-root
 echo "[1/8] SHM y runtime directories configurados OK"
 
-# 2. Control seguro de brillo (27% = 70/255) y protección anti-UVLO (chmod 444)
+# 2. Control seguro de brillo (15/255) y protección anti-UVLO (chmod 444)
 chmod 666 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-echo 70 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 chmod 444 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-if ! pgrep -x backlight_guard >/dev/null 2>&1; then
-    [ -x /bin/backlight_guard ] && /bin/backlight_guard >/dev/null 2>&1 &
+if ! pgrep -f backlight_lock >/dev/null 2>&1; then
+    [ -x /bin/backlight_lock ] && /bin/backlight_lock >/dev/null 2>&1 &
+    [ -x /sysroot/usr/bin/backlight_lock ] && /sysroot/usr/bin/backlight_lock >/dev/null 2>&1 &
 fi
-echo "[2/8] Brillo blindado en 70/255 anti-UVLO OK"
+echo "[2/8] Brillo blindado en 15/255 anti-UVLO OK"
 
 # 3. Watchdog de hardware activo (Prioridad Tiempo Real FIFO 99)
 if ! pgrep -f wdt_pet >/dev/null 2>&1; then
@@ -42,26 +43,25 @@ fi
 chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
 echo "[4/8] GPU Mali inicializada en OPP 37 seguro (390MHz@575mV) OK"
 
-# 5. Conectividad Wi-Fi MediaTek WMT
-if [ -x /bin/wmt_wifi_start.sh ] && ! ifconfig wlan0 >/dev/null 2>&1; then
-    /bin/wmt_wifi_start.sh >/tmp/wmt_wifi.log 2>&1 &
-fi
-echo "[5/8] Wi-Fi WMT verificado OK"
+# 5. Conectividad Wi-Fi MediaTek WMT (Desactivado temporalmente para evitar picos UVLO de 2A)
+# if [ -x /bin/wmt_wifi_start.sh ] && ! ifconfig wlan0 >/dev/null 2>&1; then
+#     /bin/wmt_wifi_start.sh >/tmp/wmt_wifi.log 2>&1 &
+# fi
+echo "[5/8] Wi-Fi WMT pausado para ahorro de energia OK"
 
-# 6. D-Bus, UPower, Audio (AW87359), Batería OCV y NetworkManager en sysroot
+# 6. D-Bus, UPower, Audio (AW87359), Batería OCV en sysroot
 chroot /sysroot /bin/sh -c '
     # D-Bus
     mkdir -p /run/dbus /var/run/dbus
     if [ ! -e /run/dbus/system_bus_socket ]; then
         dbus-daemon --system --fork 2>/dev/null || true
     fi
-    # NetworkManager
-    pgrep -x NetworkManager >/dev/null || NetworkManager >/var/log/nm.log 2>&1 &
+    # NetworkManager pausado para evitar escaneos de radio
+    # pgrep -x NetworkManager >/dev/null || NetworkManager >/var/log/nm.log 2>&1 &
     # UPower
     pgrep -x upowerd >/dev/null || /usr/libexec/upowerd >/dev/null 2>&1 &
-    # Modulo ADC para lectura real de voltaje de bateria
-    modprobe mt635x_auxadc 2>/dev/null || insmod /lib/modules/6.17.0-14-generic/mt635x-auxadc.ko 2>/dev/null || true
-    # Daemon Batería OCV
+    # Daemon Batería OCV (lectura pasiva desde sysfs)
+
     pgrep -f tablet_battery_monitor >/dev/null || nohup /usr/bin/python3 -u /usr/bin/tablet_battery_monitor.py >/var/log/battery_monitor.log 2>&1 &
     # Daemon Audio + Teclas + Rotacion
     pgrep -f tablet_audio_daemon >/dev/null || nohup /usr/bin/python3 -u /usr/bin/tablet_audio_daemon.py >/var/log/tablet_audio.log 2>&1 &

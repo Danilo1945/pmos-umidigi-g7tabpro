@@ -31,54 +31,46 @@ def patch_mali_kbase(input_file, output_file):
     with open(input_file, "rb") as f:
         data = bytearray(f.read())
 
-    # 1. Verificar firma en la función kbase_jd_submit
-    pattern = bytes.fromhex("c2008052 601240f9") # mov w2, #6; ldr x0, [x19, #32]
+    # 1. Localizar la comprobación de padding en kbase_jd_submit
+    # 0x359a0: a3 13 5e 38 (ldurb w3, [x29, #-31])
+    # 0x359a4: c3 10 00 35 (cbnz w3, 35bbc)
+    pattern = bytes.fromhex("a3135e38 c3100035")
     idx = data.find(pattern)
     if idx == -1:
-        raise ValueError("No se encontró el patrón de kbase_jd_submit en el módulo.")
-    print(f"[+] Patrón localizado en offset de fichero: {hex(idx)}")
+        raise ValueError("No se encontró el patrón de verificación de padding en kbase_jd_submit.")
+    print(f"[+] Verificación de padding localizada en offset de fichero: {hex(idx)}")
 
-    offset_err_code = idx + 0x14 # 0x36c38
-    offset_call_err = idx + 0x10 # 0x36c34
+    # 2. Reemplazar la primera instrucción de la verificación (offset virtual 0x359a0 / fichero idx)
+    # por un salto incondicional directo a 0x359d8 (14 instrucciones adelante = +0x38 bytes)
+    # En AArch64: b +14 -> imm26 = 14 -> opcode = 0x1400000e (little endian: 0e 00 00 14)
+    # Esto salta los 7 cheques de padding (bytes 0 a 6) y procede DIRECTAMENTE con el envío del atom.
+    b_359d8 = bytes.fromhex("0e000014")
+    data[idx:idx+4] = b_359d8
+    print(f"[+] Parcheado offset {hex(idx)}: ldurb w3, [x29, #-31] -> b 0x359d8 (0x1400000e)")
 
-    # 2. Verificar instrucción mov w20, #-22
-    orig_err_code = data[offset_err_code:offset_err_code+4]
-    assert orig_err_code == bytes.fromhex("b4028012"), f"Byte inesperado en código de error: {orig_err_code.hex()}"
+    # 3. Anular rechazo artificial de atoms con jc == NULL (0x3620c / fichero 0x3720c)
+    # Instrucción original: cbz x8, 364a0 (a8 14 00 b4) -> nop (1f 20 03 d5)
+    offset_jc1 = 0x3720c
+    assert data[offset_jc1:offset_jc1+4] == bytes.fromhex("a81400b4"), "Byte inesperado en offset_jc1"
+    data[offset_jc1:offset_jc1+4] = bytes.fromhex("1f2003d5")
+    print(f"[+] Parcheado offset {hex(offset_jc1)}: cbz x8, 364a0 (jc==NULL) -> nop")
 
-    # Parchear a mov w20, wzr (f4 03 1f 2a)
-    data[offset_err_code:offset_err_code+4] = bytes.fromhex("f4031f2a")
-    print(f"[+] Parcheado offset {hex(offset_err_code)}: mov w20, #-22 -> mov w20, wzr")
+    # 4. Anular segundo rechazo de jc == NULL (0x362a8 / fichero 0x372a8)
+    # Instrucción original: b.ne 363d8 (81 09 00 54) -> nop (1f 20 03 d5)
+    offset_jc2 = 0x372a8
+    assert data[offset_jc2:offset_jc2+4] == bytes.fromhex("81090054"), "Byte inesperado en offset_jc2"
+    data[offset_jc2:offset_jc2+4] = bytes.fromhex("1f2003d5")
+    print(f"[+] Parcheado offset {hex(offset_jc2)}: b.ne 363d8 (jc==NULL 2) -> nop")
 
-    # 3. Localizar y neutralizar relocalización ELF para 0x35c34
-    e_shoff = struct.unpack_from("<Q", data, 0x28)[0]
-    e_shentsize = struct.unpack_from("<H", data, 0x3a)[0]
-    e_shnum = struct.unpack_from("<H", data, 0x3c)[0]
+    # 5. Corregir desvío cuando nr_extres == 0 (0x362b0 / fichero 0x372b0)
+    # Instrucción original: cbz w8, 3656c (e8 15 00 b4 - saltaba a cancelación de atom)
+    # Instrucción corregida: cbz w8, 36258 (48 fd ff 34 - salta a continuación normal del atom)
+    offset_extres = 0x372b0
+    assert data[offset_extres:offset_extres+4] == bytes.fromhex("e81500b4"), "Byte inesperado en offset_extres"
+    data[offset_extres:offset_extres+4] = bytes.fromhex("48fdff34")
+    print(f"[+] Parcheado offset {hex(offset_extres)}: cbz w8, 3656c (cancel) -> cbz w8, 36258 (continue)")
 
-    found_reloc = False
-    for i in range(e_shnum):
-        s_hdr = e_shoff + i * e_shentsize
-        sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size = struct.unpack_from("<IIQQQQ", data, s_hdr)
-        if sh_type == 4: # SHT_RELA
-            num_relas = sh_size // 24
-            for r in range(num_relas):
-                r_entry_offset = sh_offset + r * 24
-                r_offset, r_info, r_addend = struct.unpack_from("<QQq", data, r_entry_offset)
-                if r_offset == 0x35c34:
-                    print(f"[+] Relocalización encontrada en offset {hex(r_entry_offset)}: r_offset=0x35c34, r_info={hex(r_info)}")
-                    # Poner r_info en 0 (R_AARCH64_NONE)
-                    struct.pack_into("<Q", data, r_entry_offset + 8, 0)
-                    found_reloc = True
-                    break
-
-    if not found_reloc:
-        raise ValueError("No se pudo localizar la relocalización ELF para 0x35c34.")
-
-    # 4. Parchear llamada a dev_err con NOP
-    assert data[offset_call_err:offset_call_err+4] == bytes.fromhex("00000094"), "Instrucción de llamada inesperada"
-    data[offset_call_err:offset_call_err+4] = bytes.fromhex("1f2003d5")
-    print(f"[+] Parcheado offset {hex(offset_call_err)}: bl _dev_err -> nop")
-
-    # 5. Escribir módulo final
+    # 6. Escribir módulo final
     with open(output_file, "wb") as f:
         f.write(data)
     print(f"[✓] Módulo parcheado exitosamente generado en: {output_file}")

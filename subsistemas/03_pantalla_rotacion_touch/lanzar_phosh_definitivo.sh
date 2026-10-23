@@ -15,14 +15,14 @@ chmod 1777 /dev/shm /sysroot/dev/shm /sysroot/tmp 2>/dev/null || true
 chmod 700 /sysroot/tmp/runtime-root
 echo "[1/8] SHM y runtime directories configurados OK"
 
-# 2. Control seguro de brillo (27% = 70/255) y protección anti-UVLO (chmod 444)
+# 2. Control seguro de brillo (15/255) y protección anti-UVLO (chmod 444)
 chmod 666 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
-echo 70 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 chmod 444 /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 if ! pgrep -x backlight_guard >/dev/null 2>&1; then
     [ -x /bin/backlight_guard ] && /bin/backlight_guard >/dev/null 2>&1 &
 fi
-echo "[2/8] Brillo blindado en 70/255 anti-UVLO OK"
+echo "[2/8] Brillo blindado en 15/255 anti-UVLO OK"
 
 # 3. Watchdog de hardware activo (Prioridad Tiempo Real FIFO 99)
 if ! pgrep -f wdt_pet >/dev/null 2>&1; then

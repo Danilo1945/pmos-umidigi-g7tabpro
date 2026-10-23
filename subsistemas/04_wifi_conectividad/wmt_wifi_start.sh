@@ -55,12 +55,15 @@ if [ -x /usr/bin/wmt_init_complete ] || [ -x /bin/wmt_init_complete ]; then
     echo "    -> wmt_init_complete finalizado (ret=$?)"
 fi
 
-# 5. Lanzar wmt_launcher oficial si existe en compat
+# 5. Lanzar wmt_launcher oficial si no está ya en ejecución (NUNCA matarlo si ya está activo para evitar reset de EMI)
 if [ -x "$COMPAT/bin/linker64" ] && [ -x "$COMPAT/bin/wmt_launcher" ]; then
-    echo "[2/4] Lanzando daemon wmt_launcher..."
-    killall -9 wmt_launcher 2>/dev/null || true
-    LD_LIBRARY_PATH="$COMPAT/lib64" "$COMPAT/bin/linker64" "$COMPAT/bin/wmt_launcher" -p /lib/firmware/ -o 1 >/tmp/wmt_launcher.log 2>&1 &
-    sleep 2
+    if ! pgrep -f wmt_launcher >/dev/null 2>&1; then
+        echo "[2/4] Lanzando daemon wmt_launcher..."
+        LD_LIBRARY_PATH="$COMPAT/lib64" "$COMPAT/bin/linker64" "$COMPAT/bin/wmt_launcher" -p /lib/firmware/ -o 1 >/tmp/wmt_launcher.log 2>&1 &
+        sleep 2
+    else
+        echo "[2/4] Daemon wmt_launcher ya está activo y protegido."
+    fi
 fi
 
 # 6. Cargar controladores de interfaz Wi-Fi

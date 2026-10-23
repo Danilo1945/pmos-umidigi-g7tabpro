@@ -30,6 +30,58 @@ int __register_atfork(void (*prepare)(void), void (*parent)(void),
     return pthread_atfork(prepare, parent, child);
 }
 
+/* ========================================================================= */
+/* INTERCEPCIÓN PTHREAD_CREATE: STACK SIZE DE 4 MB PARA SHADERS MALI        */
+/* Evita desbordamiento de pila en musl libc (128 KB por defecto)           */
+/* ========================================================================= */
+
+typedef int (*real_pthread_create_fn)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+static real_pthread_create_fn g_real_pthread_create = NULL;
+
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                   void *(*start_routine)(void *), void *arg)
+{
+    if (!g_real_pthread_create) {
+        g_real_pthread_create = (real_pthread_create_fn)dlsym(RTLD_NEXT, "pthread_create");
+    }
+
+    pthread_attr_t custom_attr;
+    int destroy_attr = 0;
+    const pthread_attr_t *effective_attr = attr;
+
+    size_t stacksize = 0;
+    if (attr) {
+        pthread_attr_getstacksize(attr, &stacksize);
+    }
+
+    if (!attr || stacksize < 4 * 1024 * 1024) {
+        pthread_attr_init(&custom_attr);
+        if (attr) {
+            int detachstate = 0;
+            if (pthread_attr_getdetachstate(attr, &detachstate) == 0) {
+                pthread_attr_setdetachstate(&custom_attr, detachstate);
+            }
+            size_t guardsize = 0;
+            if (pthread_attr_getguardsize(attr, &guardsize) == 0) {
+                pthread_attr_setguardsize(&custom_attr, guardsize);
+            }
+        }
+        pthread_attr_setstacksize(&custom_attr, 4 * 1024 * 1024);
+        effective_attr = &custom_attr;
+        destroy_attr = 1;
+    }
+
+    int ret = g_real_pthread_create ? g_real_pthread_create(thread, effective_attr, start_routine, arg)
+                                    : 38 /* ENOSYS */;
+
+    if (destroy_attr) {
+        pthread_attr_destroy(&custom_attr);
+    }
+
+    return ret;
+}
+
+
 
 struct mallinfo { int a; };
 struct mallinfo mallinfo(void) { struct mallinfo m = {0}; return m; }

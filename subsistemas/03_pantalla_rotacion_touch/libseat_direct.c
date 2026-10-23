@@ -132,12 +132,14 @@ int libseat_open_device(void *seat, const char *path, int *fd_out) {
         log_msg("\n");
         return -1;
     }
-    // Convertirse en DRM master para poder hacer modesetting
-    long ret = my_sys_ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
-    if (ret < 0) {
-        log_msg("[libseat-direct] ADVERTENCIA: DRM_IOCTL_SET_MASTER fallo (puede ser normal si ya somos master)\n");
-    } else {
-        log_msg("[libseat-direct] DRM master adquirido OK\n");
+    // Convertirse en DRM master solo si es un dispositivo /dev/dri/
+    if (path && (path[0] == '/' && path[5] == 'd' && path[6] == 'r' && path[7] == 'i')) {
+        long ret = my_sys_ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+        if (ret < 0) {
+            log_msg("[libseat-direct] ADVERTENCIA: DRM_IOCTL_SET_MASTER fallo (puede ser normal si ya somos master)\n");
+        } else {
+            log_msg("[libseat-direct] DRM master adquirido OK en /dev/dri\n");
+        }
     }
     *fd_out = fd;
     log_msg("[libseat-direct] Device abierto OK: ");

@@ -30,6 +30,11 @@
        rotate=180
        ```
      - Aplicación con `wlr-randr --output DSI-1 --on --mode 1200x1920 --transform 180`.
+3. **Resolución de Pantalla en Negro (Acaparamiento de DRM Master)**:
+   - Se neutralizó `/bin/drm_splash` (que mantenía `/dev/dri/card0` ocupado con `DRM_IOCTL_SET_MASTER`, impidiendo a Phoc adquirir el CRTC primario).
+   - Se corrigió el bucle inactivo en `/init` para disparar `/bin/start_phosh_service.sh &` automáticamente en el arranque.
+   - El brillo quedó fijado de forma inviolable en **15/255** mediante `/bin/backlight_guard` y eliminación de comandos `echo 255` y `panel_pwm_force`.
+   - Phoc y Phosh se ejecutan con sesión D-Bus completa, detectando el display `DSI-1` a 1200x1920 @ 60Hz y los eventos de entrada del digitalizador Chipone TDDI (`/dev/input/event1`).
 
 ---
 

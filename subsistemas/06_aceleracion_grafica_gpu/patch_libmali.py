@@ -35,8 +35,13 @@ PATCHES = [
     (0x1a6b1d8, bytes.fromhex("405d0035"), bytes.fromhex("1f2003d5")),
     (0x1a6b3c8, bytes.fromhex("c04d0035"), bytes.fromhex("1f2003d5")),
     (0x1a6b780, bytes.fromhex("00300035"), bytes.fromhex("1f2003d5")),
-    (0x1a6bd7c, bytes.fromhex("00a40034"), bytes.fromhex("20fd0017")),
+    (0x1a6bd7c, bytes.fromhex("00a40034"), bytes.fromhex("20fdff17")),
     (0x1a6bd8c, bytes.fromhex("41b89f97"), bytes.fromhex("1f2003d5")),
+    # Neutralización del bucle infinito usleep(500) por saturación de cola de fences Android:
+    # 0x18fbda0: Retornar siempre 0 en contador atómico de cola (mov w0, #0; ret; nop; nop)
+    (0x18fbda0, bytes.fromhex("81a787d20000018b00fcdf88c0035fd6"), bytes.fromhex("00008052c0035fd61f2003d51f2003d5")),
+    # 0x367430: Neutralizar salto condicional b.hi a usleep(500) con nop
+    (0x367430, bytes.fromhex("48ffff54"), bytes.fromhex("1f2003d5")),
 ]
 
 def patch_libmali(input_file, output_file):
