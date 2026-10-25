@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <locale.h>
 #include <stdint.h>
+#include <string.h>
 #include <dlfcn.h>
 
 /**
@@ -126,19 +127,35 @@ int ioctl(int fd, int request, ...) {
         return 0;
     }
 
-    // KBASE_IOCTL_SET_FLAGS de libmali userspace = 0x40108002 (_IOW(0x80, 2, 16 bytes))
-    // El kernel MediaTek MT6789 espera 0x40048001 (_IOW(0x80, 1, 4 bytes)) con máscara 0x7a
     if (req == 0x40108002) {
-        if (!arg) return 0;
-        uint32_t flags = *(uint32_t *)arg;
-        uint32_t safe_flags = flags & 0x7a;
-        syscall(SYS_ioctl, fd, 0x40048001, &safe_flags);
-        return 0;
+        if (!arg) return -1;
+        struct kbase_ioctl_job_submit {
+            uint64_t addr;
+            uint32_t nr_atoms;
+            uint32_t stride;
+        } *sub = (void *)arg;
+
+        if (sub->stride == 0x40 && sub->nr_atoms > 0 && sub->nr_atoms <= 256) {
+            uint8_t atoms72[256 * 72];
+            const uint8_t *src = (const uint8_t *)(uintptr_t)sub->addr;
+            memset(atoms72, 0, sub->nr_atoms * 72);
+            for (uint32_t i = 0; i < sub->nr_atoms; i++) {
+                memcpy(&atoms72[i * 72], &src[i * 64], 64);
+            }
+            struct kbase_ioctl_job_submit sub72 = {
+                .addr = (uint64_t)(uintptr_t)atoms72,
+                .nr_atoms = sub->nr_atoms,
+                .stride = 0x48
+            };
+            return syscall(SYS_ioctl, fd, 0x40108002, &sub72);
+        }
+        return syscall(SYS_ioctl, fd, 0x40108002, arg);
     }
 
-    // Si el driver invoca directamente 0x40048001 y falla por flags ya establecidos (-EPERM), ignorar
     if (req == 0x40048001) {
-        long ret = syscall(SYS_ioctl, fd, 0x40048001, arg);
+        uint32_t flags = arg ? *(uint32_t *)arg : 0;
+        uint32_t safe_flags = flags & 0x7a;
+        long ret = syscall(SYS_ioctl, fd, 0x40048001, &safe_flags);
         if (ret < 0) return 0;
         return ret;
     }

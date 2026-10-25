@@ -11,7 +11,7 @@ all: $(TARGETS)
 libgpu_interface_driver.so: gpu_interface_driver.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
-libmali_shim.so: libmali_shim.c
+libmali_shim.so: gpu_interface_driver.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 clean:

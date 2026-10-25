@@ -460,7 +460,73 @@ Durante las pruebas de despliegue de Phoc sobre el backend DRM con aceleración 
    - Controlador compilado de forma nativa en la tablet y sincronizado en `/usr/lib/libgpu_interface_driver.so`, `/bin/libgpu_interface_driver.so` y en el repositorio del proyecto.
 
 ### C. Estado Actual de Telemetría y Batería
-- **Voltaje actual de celda (ADC MT6375 canal 3):** `4063.7 mV` (`4.064 V`).
-- **Nivel de carga OCV (Celda 7500mAh):** **`72%`** (óptimo y seguro).
+- **Voltaje actual de celda (ADC MT6375 canal 3):** `4200.0 mV` (`4.20 V` - Carga completa).
 - **Retroiluminación LCD:** Blindada estrictamente en **`15 / 255`** permanente (protección anti-UVLO).
-- **Conectividad:** Enlace TCP `172.16.42.1:2323` y puerto serie ACM plenamente activos.
+- **Watchdog:** `/bin/wdt_pet` activo permanentemente en PID 206 enviando latidos cada 500 ms.
+- **Conectividad:** Enlaces SSH `172.16.42.1:2222` y Telnet puerto 23 plenamente operativos.
+
+---
+
+## 15. Conquista del Silicio Real: Parche de Product ID, Fusión de Fragment Jobs y Scanout End-to-End en Panel Novatek NT36672E
+
+### A. Resolución de "Unknown Product ID" en el Driver Userspace
+1. **Diagnóstico:** El kernel MediaTek MT6789 (`mali_kbase_mt6789_patched.ko`) reportaba en el ioctl `KBASE_IOCTL_GET_GPUPROPS` (`0x40108003`):
+   - `prop_id = 1` (GPU ID): `0x9093`
+   - `prop_id = 55`: `0x90930010`
+   `libmali` comparaba contra su tabla interna y, al no reconocer `0x9093`, emitía `Unknown Product ID` y desactivaba extensiones de hardware de Valhall.
+2. **Solución Implementada en `gpu_interface_driver.c`:**
+   - Se interceptó el ioctl `0x40108003`, iterando la tabla TLV de propiedades del kernel:
+     - `prop_id = 1`: Se sustituye `0x9093` por `0x9091` (ID oficial de silicio ARM Mali-G57 MC2 Valhall).
+     - `prop_id = 55`: Se sustituye `0x90930010` por `0x90910010`.
+   - **Resultado:** `libmali` reporta oficialmente y de forma nativa:
+     `GL_VENDOR: ARM, GL_RENDERER: Mali-G57, GL_VERSION: OpenGL ES 3.2 v1.g24p0-00eac0`.
+
+### B. Ejecución Exitosa de `glClear` y Lectura de Píxeles por Hardware (`test_clear.c`)
+1. **El fallo de Fragment Job resuelto:** En el descriptor de frame `JC[2.0]`, `libmali` emitía un pre-frame job con bounding box nulo (`w4 = 0`) y descriptor SFBD (`tag = 1`), que la GPU Valhall v9 rechazaba con `DATA_INVALID_FAULT (0x58)`.
+2. **Fusión en `gpu_interface_driver.c`:**
+   - Se implementó la detección de `type == 9 && p[4] == 0 && p[3] != 0`.
+   - Se fusionó el contenido de `JC[2.1]` (MFBD con tag 3 y bounding box real) sobre la dirección alineada a 128 bytes de `JC[2.0]`.
+   - Se forzó alineación estricta de 128 bytes (`addr & 0x7f == 0`) exigida por el Job Manager de Valhall v9.
+3. **Resultado en Silicio:**
+   - Todos los átomos (`ATOM[1]` y `ATOM[2]`) finalizaron con `status = 0x0000000000000001` (Éxito de hardware).
+   - `glFinish()` completó limpiamente.
+   - `glReadPixels(32, 32)` leyó directamente de la memoria de la GPU el color cian exacto: `R=0, G=200, B=255, A=255`.
+
+### C. Demostración End-to-End de Scanout en Panel LCD Físico (`test_scanout_driver_view.c`)
+Se implementó y ejecutó la prueba end-to-end completa en la tablet:
+1. Adquisición limpia de DRM Master con `drmSetMaster(card_fd) = 0`.
+2. Detección de panel DSI-1 (conector ID 32, CRTC ID 68, modo `1200x1920 @ 60Hz`).
+3. Creación de Dumb BO en KMS con `GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING` e importación en Mali vía `GBM_BO_IMPORT_FD_MODIFIER (0x5504)`.
+4. Registro en KMS (`drmModeAddFB ret=0, fb_id=109`).
+5. Renderizado en hardware GPU Mali-G57 a resolución completa 1200x1920 en color Verde Esmeralda (`R=0.0, G=0.8, B=0.4, A=1.0`).
+6. Volcado directo al controlador Novatek NT36672E vía DSI:
+   `drmModeSetCrtc ret=0 (ÉXITO TOTAL)`.
+7. **La pantalla física de la tablet mostró el color verde esmeralda generado por el hardware de la GPU durante 3 segundos sin caídas de tensión ni fallos de kernel.**
+
+---
+
+## 16. Diagnóstico Técnico de la Geometría 3D y Próximos Pasos
+
+### A. Causa Raíz de Arquitectura en la Geometría (`glDrawArrays` / Phoc)
+Al analizar las especificaciones de Mesa (`v7.xml` vs `v9.xml` y `pan_jm.c`), se esclareció la incompatibilidad que provoca que `test_draw_arrays` / `test_pixels` no rastericen triángulos:
+1. **Diferencia de Hardware entre Bifrost y Valhall:**
+   - `libmali-bifrost-patched.so` emite la geometría en dos trabajos independientes: `Job Type 5 (VERTEX)` y `Job Type 7 (TILER)`.
+   - En **Valhall v9 (Mali-G57)**, el circuito de hardware para `Job Type 5` **fue eliminado físicamente del silicio**. Valhall exige obligatoriamente **IDVS (Index-Driven Vertex Shading)** mediante **Malloc Vertex Jobs (`Job Type 11`)**, donde vértice y tiler se fusionan con asignación dinámica de memoria en la GPU.
+   - En el Tiler Job (Tipo 7), Bifrost coloca el `Tiler Pointer` en el offset `72` (`w[9]`), mientras que Valhall lo exige en el offset `56` (`w[7]`).
+   - El descriptor `Draw` de Bifrost tiene punteros separados (`Position`, `Uniforms`, `Textures`), mientras que Valhall exige una estructura empaquetada con `Shader Environment` de 64 bytes embebido.
+   - Los Shader Cores de Mali-G57 ejecutan **Valhall ISA** (instrucciones escalares de 64 bits), mientras que `libmali-bifrost` genera **Bifrost ISA** (cláusulas VLIW de 128 bits).
+
+### B. Inventario de Componentes Clave Disponibles
+1. **Driver Userspace Nativo Valhall:**
+   - Localizado en `/home/danilo/Documentos/TABLET/android_compat/lib64/libGLES_mali.so`.
+   - Versión: `1.4 Valhall-"r32p1-01eac0"` (coincidencia 1:1 exacta con nuestro kernel module `mali-r32p1`).
+   - Genera nativamente Valhall ISA y Malloc Vertex Jobs (Tipo 11).
+2. **Driver Libre Mesa Panfrost:**
+   - Instalado en la tablet: `mesa-dri-gallium 26.2.4` (`panfrost_dri.so`), con soporte nativo de Valhall v9 (Mali-G57).
+
+### C. Estrategia y Hoja de Ruta para la Próxima Sesión
+El objetivo absoluto e inquebrantable para la siguiente sesión es **renderizar la interfaz gráfica de usuario con la GPU**:
+1. **Ruta 1 (DDK Nativo Valhall):** Conectar `libGLES_mali.so` (Valhall r32p1) con el entorno Linux mediante el shim de compatibilidad Android para que emita Malloc Vertex Jobs nativos directamente a `mali_kbase`.
+2. **Ruta 2 (Traducción en Shim):** Implementar en `gpu_interface_driver.c` el empaquetado de `MALI_JOB_TYPE_MALLOC_VERTEX` (Tipo 11) traduciendo la invocación y el descriptor de sombreado hacia el formato nativo Valhall.
+3. **Ruta 3 (Mesa Panfrost con kbase shim):** Conectar Mesa Panfrost (`panfrost_dri.so`) mediante un puente de ioctls hacia `/dev/mali0`.
+

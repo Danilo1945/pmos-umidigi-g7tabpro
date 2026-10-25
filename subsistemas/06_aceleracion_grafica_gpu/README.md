@@ -229,6 +229,10 @@ chroot /sysroot env LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.
 | :--- | :--- |
 | `gpu_interface_driver.c` | Driver de interfaz C para conexión de compositores Wayland (wlroots/Phoc) con GPU Mali-G57 |
 | `libgpu_interface_driver.so` | Binario compilado AArch64 del driver de interfaz con soporte GBM extendido, ioctl y EGL Wayland |
+| `test_scanout_driver_view.c` | Prueba end-to-end de renderizado por GPU Mali-G57 y scanout directo al panel Novatek NT36672E (1200x1920 @ 60Hz) |
+| `test_clear.c` | Prueba de renderizado GLES2 por hardware (glClear) y verificación con glReadPixels |
+| `test_draw_arrays.c` | Prueba de renderizado de geometría con VBO y shaders GLSL en FBO |
+| `test_pixels.c` | Análisis granular de píxeles renderizados (4096 px) para diagnóstico de rasterización |
 | `test_interface_driver.py` | Suite de validación en Python para verificar modificadores GBM y enlaces Wayland del driver |
 | `patch_mali_kbase.py` | Script que modifica el módulo de kernel anulando el check de padding y neutralizando relocalizaciones ELF |
 | `patch_libmali.py` | Script que modifica el driver DDK de ARM para admitir la GPU Mali-G57 y neutralizar excepciones C++ |
