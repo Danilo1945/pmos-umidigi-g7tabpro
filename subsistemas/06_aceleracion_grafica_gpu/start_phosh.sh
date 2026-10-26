@@ -107,15 +107,14 @@ export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# 10. Aceleración GPU ARM Mali-G57 MC2 (GLES2 + DRM Atómico)
+# 10. Aceleración GPU ARM Mali-G57 MC2 (GLES2 + DRM Legacy Estable)
 export WLR_RENDERER=gles2
 export WLR_RENDERER_ALLOW_SOFTWARE=0
 export WLR_BACKENDS=drm,libinput
 export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
-# CRÍTICO: unset WLR_DRM_NO_ATOMIC (MediaTek DRM exige modosetting atómico)
-unset WLR_DRM_NO_ATOMIC
+export WLR_DRM_NO_ATOMIC=1
 
 # 11. Variables de integración para clientes Wayland
 export EGL_PLATFORM=wayland
