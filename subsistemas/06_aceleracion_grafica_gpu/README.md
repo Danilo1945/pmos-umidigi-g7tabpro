@@ -151,6 +151,14 @@ Este documento detalla el hito técnico tras tres semanas de investigación e in
 
 ## 4. Verificación y Resultados de Rendimiento
 
+### Prueba de Interfaz Gráfica Wayland Completa (`Phoc` + `Phosh` + `Foot`)
+Se validó la ejecución en silicio real del compositor Wayland oficial `Phoc` con el shell móvil GNOME `Phosh` y la terminal `Foot` acelerados al 100% por hardware:
+- **Renderer**: `WLR_RENDERER=gles2` sobre `/dev/mali0` (ARM Mali-G57 MC2 Valhall v9, ID `0x9091`).
+- **Display**: Panel físico Novatek NT36672E a **1200x1920 @ 60.000 Hz**.
+- **Swapchain**: Doble Buffering KMS (`DRM_IOCTL_MODE_CREATE_DUMB`) importado vía `GBM_BO_IMPORT_FD_MODIFIER (0x5504)` con modificador lineal.
+- **Page Flipping y VBLANK**: Sincronización continua de fotogramas por hardware (`drmModePageFlip` + VBLANK events).
+- **Estabilidad**: Más de 15 minutos de ejecución ininterrumpida sin reinicios ni pánicos del SoC.
+
 ### Prueba de Cómputo 3D Nativo (`kmscube -c 60`)
 Se ejecutó la suite de referencia KMS/GBM `kmscube` en la tablet bajo el entorno parcheado:
 
@@ -230,6 +238,7 @@ chroot /sysroot env LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.
 | `gpu_interface_driver.c` | Driver de interfaz C para conexión de compositores Wayland (wlroots/Phoc) con GPU Mali-G57 |
 | `libgpu_interface_driver.so` | Binario compilado AArch64 del driver de interfaz con soporte GBM extendido, ioctl y EGL Wayland |
 | `test_scanout_driver_view.c` | Prueba end-to-end de renderizado por GPU Mali-G57 y scanout directo al panel Novatek NT36672E (1200x1920 @ 60Hz) |
+| `test_page_flip.c` | Demostración de Doble Buffering KMS, Page Flipping por hardware y eventos VBLANK a 60 Hz en silicio real |
 | `test_clear.c` | Prueba de renderizado GLES2 por hardware (glClear) y verificación con glReadPixels |
 | `test_draw_arrays.c` | Prueba de renderizado de geometría con VBO y shaders GLSL en FBO |
 | `test_pixels.c` | Análisis granular de píxeles renderizados (4096 px) para diagnóstico de rasterización |

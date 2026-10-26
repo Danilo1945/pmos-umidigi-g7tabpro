@@ -530,3 +530,56 @@ El objetivo absoluto e inquebrantable para la siguiente sesión es **renderizar 
 2. **Ruta 2 (Traducción en Shim):** Implementar en `gpu_interface_driver.c` el empaquetado de `MALI_JOB_TYPE_MALLOC_VERTEX` (Tipo 11) traduciendo la invocación y el descriptor de sombreado hacia el formato nativo Valhall.
 3. **Ruta 3 (Mesa Panfrost con kbase shim):** Conectar Mesa Panfrost (`panfrost_dri.so`) mediante un puente de ioctls hacia `/dev/mali0`.
 
+---
+
+## 17. Conquista Histórica: Ejecución Estable de la Interfaz Gráfica Wayland Completa (Phoc + Phosh + Foot) con Aceleración por Hardware en GPU ARM Mali-G57 MC2
+
+### A. Diagnóstico y Neutralización de los Reinicios en Modosetting KMS
+1. **El fallo del plano de cursor en MediaTek DRM:**
+   - Durante la transición de modosetting en el backend DRM de `wlroots` (`backend/drm/legacy.c:165`), `phoc` intentaba programar un cursor de hardware mediante `drmModeSetCursor`.
+   - En el controlador `mediatek-drm` (Linux 5.10 de Android 12), la actualización de cursor asíncrona (`mtk_drm_crtc_async_update` / `CMDQ`) espera buffers asignados en el IOMMU específico de display. Al recibir un buffer GEM sin este mapeo, el hardware de MediaTek generaba una violación de seguridad (`device_apc_mt6789`) provocando un reinicio frío del SoC (`WDT status: 6`).
+   - **Solución Implementada en `gpu_interface_driver.c` (v11):**
+     - Se interceptaron públicamente `drmModeSetCursor`, `drmModeSetCursor2` y `drmModeMoveCursor` retornando `-EINVAL` (`errno = EINVAL`), y se neutralizaron los ioctls `DRM_IOCTL_MODE_CURSOR` y `DRM_IOCTL_MODE_CURSOR2`.
+     - Esto fuerza a `wlroots` a conmutar inmediatamente a **Software Cursor** (renderizado de cursor por GPU sobre el frame buffer principal), erradicando las llamadas conflictivas hacia el plano de cursor de hardware de MediaTek.
+
+2. **Blindaje de Memoria contra Destrucción Prematura de Framebuffers Activos:**
+   - En `wlroots`, tras llamar a `drmModeAddFB2`, la rutina de adquisición intentaba cerrar el handle temporal con `drmCloseBufferHandle` / `DRM_IOCTL_GEM_CLOSE`.
+   - En `mediatek-drm`, cerrar el handle de un dumb buffer activo en el CRTC decrementaba a cero el refcount de GEM liberando la memoria física CMA mientras el pipeline DSI transmitía a 60 Hz.
+   - **Solución Implementada:**
+     - Función `is_active_dumb_handle(handle)` que verifica si el handle está registrado en `g_dumb_table`.
+     - `drmIoctl` y `drmCloseBufferHandle` blindados para rechazar incondicionalmente `DRM_IOCTL_MODE_DESTROY_DUMB` y `DRM_IOCTL_GEM_CLOSE` sobre framebuffers activos, preservando la memoria contigua en KMS.
+
+### B. Validación de Doble Buffering y VBLANK en Silicio Real (`test_page_flip`)
+- Se compiló con `gcc` nativo en la tablet y se ejecutó en silicio real con el driver interceptor v11 (`caf18ad92b76da6a7f61d68b7edd03d903c83abadefe58f9015a35ae62a78701`):
+  1. Adquisición de DRM Master en `/dev/dri/card0`.
+  2. Panel DSI detectado (ID=32, CRTC=68, 1200x1920 @ 60Hz).
+  3. Dos Dumb Buffers KMS independientes creados e importados a Mali vía `0x5504` (`GBM_BO_IMPORT_FD_MODIFIER`).
+  4. Renderizado GLES2 en silicio con FBOs: Frame 1 (Verde Esmeralda) y Frame 2 (Azul).
+  5. `drmModeSetCrtc` con Frame 1 -> `ret=0`. El panel LCD proyectó verde durante 1.5s.
+  6. `drmModePageFlip` hacia Frame 2 con `DRM_MODE_PAGE_FLIP_EVENT` -> `ret=0`.
+  7. Evento VBLANK capturado limpiamente (`seq=3042`).
+  8. El panel LCD cambió limpiamente a Azul. Código de salida: `0`, uptime continuo y cero reinicios.
+
+### C. Ejecución de la Interfaz Gráfica Wayland Completa en Hardware Real
+- Con el entorno blindado, se arrancó la sesión gráfica oficial:
+  ```bash
+  export WLR_RENDERER=gles2
+  export WLR_RENDERER_ALLOW_SOFTWARE=0
+  export WLR_BACKENDS=drm,libinput
+  export WLR_LIBINPUT_NO_DEVICES=1
+  export WLR_NO_HARDWARE_CURSORS=1
+  export WLR_DRM_NO_MODIFIERS=1
+  export WLR_DRM_NO_ATOMIC=1
+  export LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.6 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so /usr/lib/libmali-bifrost-patched.so"
+  ```
+- **Resultados en Silicio:**
+  1. `phoc` (PID 22802) adquirió `/dev/dri/card0`, `/dev/mali0`, `/dev/input/event0` (pantalla táctil) y nodos `malitl`.
+  2. Modosetting KMS completado con `fb_id = 109` a 1200x1920 @ 60Hz.
+  3. Socket del servidor Wayland activo en `/tmp/runtime-root/wayland-0`.
+  4. Clientes Wayland conectados y renderizando simultáneamente:
+     - `/usr/libexec/phosh -U` (GNOME Mobile Shell en PIDs 17448 y 25196).
+     - `foot` (Terminal Wayland en PID 7952).
+  5. Decenas de miles de átomos de renderizado procesados por la GPU física ARM Mali-G57 MC2 (`ioctl JOB_SUBMIT ret=0 status=1`).
+  6. **Uptime continuo superior a 15 minutos ininterrumpidos** con telemetría de batería estable, retroiluminación blindada en 15/255 y frecuencia fijada en OPP 37 (390 MHz @ 575 mV).
+
+

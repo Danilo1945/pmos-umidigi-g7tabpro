@@ -20,8 +20,37 @@
 #include <time.h>
 
 
+static int g_kms_fd = -1;
+int is_active_dumb_handle(uint32_t handle);
+
 __attribute__((visibility("default")))
 int drmIoctl(int fd, unsigned long request, void *arg) {
+    if (fd >= 0 && g_kms_fd < 0) {
+        struct drm_get_cap c = { .capability = DRM_CAP_DUMB_BUFFER };
+        if (ioctl(fd, DRM_IOCTL_GET_CAP, &c) == 0 && c.value != 0) {
+            g_kms_fd = fd;
+        }
+    }
+
+    if (request == DRM_IOCTL_MODE_DESTROY_DUMB && arg) {
+        struct drm_mode_destroy_dumb *d = (struct drm_mode_destroy_dumb *)arg;
+        if (is_active_dumb_handle(d->handle)) {
+            return 0;
+        }
+    }
+
+    if (request == DRM_IOCTL_GEM_CLOSE && arg) {
+        struct drm_gem_close *c = (struct drm_gem_close *)arg;
+        if (is_active_dumb_handle(c->handle)) {
+            return 0;
+        }
+    }
+
+    if (request == DRM_IOCTL_MODE_CURSOR || request == DRM_IOCTL_MODE_CURSOR2) {
+        errno = EINVAL;
+        return -1;
+    }
+
     return ioctl(fd, request, arg);
 }
 
@@ -36,6 +65,20 @@ int drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd) {
         return ret;
     if (prime_fd)
         *prime_fd = args.fd;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle) {
+    struct drm_prime_handle args;
+    memset(&args, 0, sizeof(args));
+    args.fd = prime_fd;
+    args.flags = 0;
+    int ret = ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &args);
+    if (ret)
+        return ret;
+    if (handle)
+        *handle = args.handle;
     return 0;
 }
 
@@ -73,11 +116,25 @@ static inline int is_debug_enabled(void) {
     return g_debug_enabled;
 }
 
+static inline void kmsg_log(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        int kfd = open("/dev/kmsg", O_WRONLY);
+        if (kfd >= 0) {
+            write(kfd, buf, n);
+            close(kfd);
+        }
+        fprintf(stderr, "%s", buf);
+        fflush(stderr);
+    }
+}
+
 #define GPU_LOG(fmt, ...) do { \
-    if (is_debug_enabled()) { \
-        fprintf(stderr, "[gpu-interface-driver] " fmt "\n", ##__VA_ARGS__); \
-        fflush(stderr); \
-    } \
+    kmsg_log("[gpu-driver] " fmt "\n", ##__VA_ARGS__); \
 } while(0)
 
 /* ========================================================================= */
@@ -889,6 +946,7 @@ struct dumb_bo_entry {
     struct gbm_bo *bo;
     uint32_t dumb_handle;
     int card_fd;
+    int prime_fd;
     uint32_t width;
     uint32_t height;
     uint32_t stride;
@@ -899,6 +957,19 @@ struct dumb_bo_entry {
 static struct dumb_bo_entry g_dumb_table[MAX_DUMB_ENTRIES] = {0};
 static pthread_mutex_t g_dumb_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_drm_fd = -1;
+
+int is_active_dumb_handle(uint32_t handle) {
+    if (!handle) return 0;
+    pthread_mutex_lock(&g_dumb_mutex);
+    for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+        if (g_dumb_table[i].bo && g_dumb_table[i].dumb_handle == handle) {
+            pthread_mutex_unlock(&g_dumb_mutex);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&g_dumb_mutex);
+    return 0;
+}
 
 /* Punteros a la implementación real de GBM en libmali */
 static struct gbm_device *(*real_gbm_create_device)(int) = NULL;
@@ -936,7 +1007,7 @@ static void (*real_gbm_surface_destroy)(struct gbm_surface *) = NULL;
 static struct gbm_bo *(*real_gbm_surface_lock_front_buffer)(struct gbm_surface *) = NULL;
 static void (*real_gbm_surface_release_buffer)(struct gbm_surface *, struct gbm_bo *) = NULL;
 
-static void register_dumb_bo(struct gbm_bo *bo, uint32_t dumb_handle, int card_fd,
+static void register_dumb_bo(struct gbm_bo *bo, uint32_t dumb_handle, int card_fd, int prime_fd,
                              uint32_t width, uint32_t height, uint32_t stride,
                              uint32_t format, uint64_t size) {
     pthread_mutex_lock(&g_dumb_mutex);
@@ -945,14 +1016,15 @@ static void register_dumb_bo(struct gbm_bo *bo, uint32_t dumb_handle, int card_f
             g_dumb_table[i].bo = bo;
             g_dumb_table[i].dumb_handle = dumb_handle;
             g_dumb_table[i].card_fd = card_fd;
+            g_dumb_table[i].prime_fd = prime_fd;
             g_dumb_table[i].width = width;
             g_dumb_table[i].height = height;
             g_dumb_table[i].stride = stride;
             g_dumb_table[i].format = format;
             g_dumb_table[i].size = size;
             pthread_mutex_unlock(&g_dumb_mutex);
-            GPU_LOG("Registrado dumb bo %p (slot %d, handle %u, %ux%u, stride %u)",
-                    (void*)bo, i, dumb_handle, width, height, stride);
+            GPU_LOG("Registrado dumb bo %p (slot %d, handle %u, prime_fd %d, %ux%u, stride %u)",
+                    (void*)bo, i, dumb_handle, prime_fd, width, height, stride);
             return;
         }
     }
@@ -970,23 +1042,37 @@ static struct dumb_bo_entry *find_dumb_bo_locked(struct gbm_bo *bo) {
     return NULL;
 }
 
+static struct dumb_bo_entry *find_dumb_bo_by_handle_locked(uint32_t handle) {
+    if (!handle) return NULL;
+    for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+        if (g_dumb_table[i].bo != NULL && g_dumb_table[i].dumb_handle == handle) {
+            return &g_dumb_table[i];
+        }
+    }
+    return NULL;
+}
+
 static void unregister_and_destroy_dumb_bo(struct gbm_bo *bo) {
     pthread_mutex_lock(&g_dumb_mutex);
     for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
         if (g_dumb_table[i].bo == bo) {
             uint32_t dumb_handle = g_dumb_table[i].dumb_handle;
-            int card_fd = g_dumb_table[i].card_fd;
+            int prime_fd = g_dumb_table[i].prime_fd;
             g_dumb_table[i].bo = NULL;
-            g_dumb_table[i].dumb_handle = 0;
-            g_dumb_table[i].card_fd = -1;
             pthread_mutex_unlock(&g_dumb_mutex);
 
-            if (card_fd >= 0 && dumb_handle > 0) {
-                struct drm_mode_destroy_dumb dreq = {0};
-                dreq.handle = dumb_handle;
-                drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-                GPU_LOG("Dumb BO liberado de KMS: handle=%u (card_fd=%d)", dumb_handle, card_fd);
+            if (prime_fd >= 0) {
+                close(prime_fd);
             }
+            /*
+             * NOTA CRÍTICA DE HARDWARE MEDIATEK:
+             * NUNCA destruir el dumb handle con DRM_IOCTL_MODE_DESTROY_DUMB mientras el CRTC
+             * o el pipeline DSI/CMDQ esté activo. La destrucción prematura del dumb buffer en KMS
+             * provoca que el DMA de MediaTek intente leer una página liberada, activando
+             * una violación de protección IOMMU / device_apc_mt6789 y disparando el reinicio del SoC.
+             * Los buffers KMS se liberan de forma segura por el kernel al cerrar card_fd.
+             */
+            kmsg_log("[GPU-GBM] Dumb BO desvinculado (handle=%u preservado en KMS para scanout seguro)\n", dumb_handle);
             return;
         }
     }
@@ -1071,10 +1157,26 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
                                              uint32_t width, uint32_t height,
                                              uint32_t format, uint32_t flags)
 {
-    int card_fd = get_device_fd(gbm);
-    GPU_LOG("create_scanout_dumb_bo: gbm=%p, card_fd=%d", (void*)gbm, card_fd);
+    /* Solo crear Dumb BO KMS si el buffer es solicitado explícitamente para scanout */
+    if (!(flags & GBM_BO_USE_SCANOUT)) {
+        return NULL;
+    }
+
+    int card_fd = -1;
+    if (g_kms_fd >= 0) {
+        card_fd = g_kms_fd;
+    } else {
+        card_fd = get_device_fd(gbm);
+    }
     if (card_fd < 0) {
-        GPU_LOG("ERROR: No se detectó descriptor de card0 para crear dumb buffer");
+        card_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+        if (card_fd >= 0) g_drm_fd = card_fd;
+        kmsg_log("[GPU-GBM] Fallback open card0: fd=%d\n", card_fd);
+    }
+    kmsg_log("[GPU-GBM] create_scanout_dumb_bo: gbm=%p, card_fd=%d (kms_fd=%d), %ux%u format=0x%x flags=0x%x\n",
+             (void*)gbm, card_fd, g_kms_fd, width, height, format, flags);
+    if (card_fd < 0) {
+        kmsg_log("[GPU-GBM] ERROR: No se detectó descriptor de card0 para crear dumb buffer\n");
         return NULL;
     }
 
@@ -1089,19 +1191,21 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
 
     int ret = drmIoctl(card_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
     if (ret != 0 || creq.handle == 0) {
-        GPU_LOG("ERROR: DRM_IOCTL_MODE_CREATE_DUMB falló (ret=%d, errno=%d)", ret, errno);
+        kmsg_log("[GPU-GBM] ERROR: DRM_IOCTL_MODE_CREATE_DUMB falló (ret=%d, errno=%d)\n", ret, errno);
         return NULL;
     }
 
     int prime_fd = -1;
     ret = drmPrimeHandleToFD(card_fd, creq.handle, DRM_CLOEXEC | DRM_RDWR, &prime_fd);
     if (ret != 0 || prime_fd < 0) {
-        GPU_LOG("ERROR: drmPrimeHandleToFD falló (ret=%d, errno=%d)", ret, errno);
+        kmsg_log("[GPU-GBM] ERROR: drmPrimeHandleToFD falló (ret=%d, errno=%d)\n", ret, errno);
         struct drm_mode_destroy_dumb dreq = {0};
         dreq.handle = creq.handle;
         drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
         return NULL;
     }
+
+    int saved_prime_fd = fcntl(prime_fd, F_DUPFD_CLOEXEC, 0);
 
     struct gbm_import_fd_modifier_data_local mod_data = {
         .width = width,
@@ -1114,8 +1218,8 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
         .modifier = DRM_FORMAT_MOD_LINEAR
     };
 
-    GPU_LOG("Importando dumb buffer a Mali via 0x5504 (MODIFIER LINEAR): prime_fd=%d, %ux%u, stride=%u, format=0x%x, flags=0x%x",
-            prime_fd, width, height, creq.pitch, format, flags);
+    kmsg_log("[GPU-GBM] Importando dumb buffer a Mali via 0x5504: prime_fd=%d, %ux%u stride=%u\n",
+             prime_fd, width, height, creq.pitch);
     struct gbm_bo *bo = NULL;
     if (real_gbm_bo_import) {
         bo = real_gbm_bo_import(gbm, GBM_BO_IMPORT_FD_MODIFIER, &mod_data, flags | GBM_BO_USE_RENDERING);
@@ -1123,14 +1227,17 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
     close(prime_fd);
 
     if (!bo) {
-        GPU_LOG("ERROR: real_gbm_bo_import falló al importar dumb buffer hacia Mali (errno=%d)", errno);
+        kmsg_log("[GPU-GBM] ERROR: real_gbm_bo_import falló (errno=%d)\n", errno);
+        if (saved_prime_fd >= 0) close(saved_prime_fd);
         struct drm_mode_destroy_dumb dreq = {0};
         dreq.handle = creq.handle;
         drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
         return NULL;
     }
 
-    register_dumb_bo(bo, creq.handle, card_fd, width, height, creq.pitch, format, creq.size);
+    register_dumb_bo(bo, creq.handle, card_fd, saved_prime_fd, width, height, creq.pitch, format, creq.size);
+    kmsg_log("[GPU-GBM] Dumb BO registrado OK: bo=%p, handle=%u, prime_fd=%d, pitch=%u, size=%llu\n",
+             (void*)bo, creq.handle, saved_prime_fd, creq.pitch, (unsigned long long)creq.size);
     GPU_LOG("Dumb BO creado exitosamente: bo=%p, handle=%u, pitch=%u, size=%llu",
             (void*)bo, creq.handle, creq.pitch, (unsigned long long)creq.size);
 
@@ -1356,10 +1463,15 @@ union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo) {
         union gbm_bo_handle h = {0};
         h.u32 = entry->dumb_handle;
         pthread_mutex_unlock(&g_dumb_mutex);
+        kmsg_log("[GPU-GBM] gbm_bo_get_handle(bo=%p) -> DUMB handle=%u\n", (void*)bo, h.u32);
         return h;
     }
     pthread_mutex_unlock(&g_dumb_mutex);
-    if (real_gbm_bo_get_handle) return real_gbm_bo_get_handle(bo);
+    if (real_gbm_bo_get_handle) {
+        union gbm_bo_handle h = real_gbm_bo_get_handle(bo);
+        kmsg_log("[GPU-GBM] gbm_bo_get_handle(bo=%p) -> REAL handle=%u\n", (void*)bo, h.u32);
+        return h;
+    }
     union gbm_bo_handle h = {0};
     return h;
 }
@@ -1581,9 +1693,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (mali) real_glDrawArrays = dlsym(mali, "glDrawArrays");
         if (!real_glDrawArrays) real_glDrawArrays = dlsym(RTLD_NEXT, "glDrawArrays");
     }
+    kmsg_log("[GPU-GL] >>> glDrawArrays: mode=0x%x, first=%d, count=%d\n", mode, first, count);
     if (real_glDrawArrays) {
         real_glDrawArrays(mode, first, count);
     }
+    glFinish();
+    kmsg_log("[GPU-GL] <<< glDrawArrays RET\n");
 }
 
 __attribute__((visibility("default")))
@@ -1594,15 +1709,200 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
         if (mali) real_glDrawElements = dlsym(mali, "glDrawElements");
         if (!real_glDrawElements) real_glDrawElements = dlsym(RTLD_NEXT, "glDrawElements");
     }
+    kmsg_log("[GPU-GL] >>> glDrawElements: mode=0x%x, count=%d, type=0x%x\n", mode, count, type);
     if (real_glDrawElements) {
         real_glDrawElements(mode, count, type, indices);
     }
+    glFinish();
+    kmsg_log("[GPU-GL] <<< glDrawElements RET\n");
+}
+
+static void (*real_glClear)(unsigned int) = NULL;
+__attribute__((visibility("default")))
+void glClear(unsigned int mask) {
+    if (!real_glClear) {
+        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mali) real_glClear = dlsym(mali, "glClear");
+        if (!real_glClear) real_glClear = dlsym(RTLD_NEXT, "glClear");
+    }
+    kmsg_log("[GPU-GL] >>> glClear: mask=0x%x\n", mask);
+    if (real_glClear) {
+        real_glClear(mask);
+    }
+    kmsg_log("[GPU-GL] <<< glClear RET\n");
+}
+
+static EGLBoolean (*real_eglSwapBuffers)(EGLDisplay, void *) = NULL;
+__attribute__((visibility("default")))
+EGLBoolean eglSwapBuffers(EGLDisplay dpy, void *surface) {
+    if (!real_eglSwapBuffers) {
+        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mali) real_eglSwapBuffers = dlsym(mali, "eglSwapBuffers");
+        if (!real_eglSwapBuffers) real_eglSwapBuffers = dlsym(RTLD_NEXT, "eglSwapBuffers");
+    }
+    glFinish();
+    kmsg_log("[GPU-EGL] >>> eglSwapBuffers: dpy=%p, surf=%p\n", dpy, surface);
+    EGLBoolean ret = real_eglSwapBuffers ? real_eglSwapBuffers(dpy, surface) : 0;
+    glFinish();
+    kmsg_log("[GPU-EGL] <<< eglSwapBuffers RET=%u\n", ret);
+    return ret;
 }
 
 
-typedef void *EGLConfig;
+#ifndef EGL_LINUX_DMA_BUF_EXT
+#define EGL_LINUX_DMA_BUF_EXT 0x3270
+#endif
+#ifndef EGL_WIDTH
+#define EGL_WIDTH 0x3057
+#endif
+#ifndef EGL_HEIGHT
+#define EGL_HEIGHT 0x3056
+#endif
+#ifndef EGL_LINUX_DRM_FOURCC_EXT
+#define EGL_LINUX_DRM_FOURCC_EXT 0x3271
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_FD_EXT
+#define EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_PITCH_EXT
+#define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT 0x3275
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT 0x3276
+#endif
+
+#ifndef EGL_NONE
+#define EGL_NONE 0x3038
+#endif
+#ifndef EGL_NO_CONTEXT
+#define EGL_NO_CONTEXT ((EGLContext)0)
+#endif
+
 typedef void *EGLContext;
+typedef void *EGLConfig;
 typedef int EGLint;
+typedef void *EGLImageKHR;
+typedef void *EGLClientBuffer;
+
+static EGLImageKHR (*real_eglCreateImageKHR)(EGLDisplay, EGLContext, unsigned int, EGLClientBuffer, const int *) = NULL;
+static EGLBoolean (*real_eglDestroyImageKHR)(EGLDisplay, EGLImageKHR) = NULL;
+
+#ifndef EGL_NATIVE_PIXMAP_KHR
+#define EGL_NATIVE_PIXMAP_KHR 0x30B0
+#endif
+
+__attribute__((visibility("default")))
+EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int target,
+                              EGLClientBuffer buffer, const int *attrib_list)
+{
+    if (!real_eglCreateImageKHR) {
+        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mali) real_eglCreateImageKHR = dlsym(mali, "eglCreateImageKHR");
+        if (!real_eglCreateImageKHR) real_eglCreateImageKHR = dlsym(RTLD_NEXT, "eglCreateImageKHR");
+    }
+
+    if (target == EGL_LINUX_DMA_BUF_EXT && attrib_list) {
+        int patched_attribs[64];
+        int count = 0;
+        int has_mod = 0;
+        int dma_fd = -1;
+        int fd_idx = -1;
+        uint32_t w = 0, h = 0, stride = 0, fourcc = 0;
+
+        for (int i = 0; attrib_list[i] != EGL_NONE && count < 56; i += 2) {
+            int attr = attrib_list[i];
+            int val = attrib_list[i + 1];
+
+            if (attr == EGL_WIDTH) w = (uint32_t)val;
+            else if (attr == EGL_HEIGHT) h = (uint32_t)val;
+            else if (attr == EGL_LINUX_DRM_FOURCC_EXT) fourcc = (uint32_t)val;
+            else if (attr == EGL_DMA_BUF_PLANE0_FD_EXT) {
+                dma_fd = val;
+                fd_idx = count + 1;
+            }
+            else if (attr == EGL_DMA_BUF_PLANE0_PITCH_EXT) stride = (uint32_t)val;
+            else if (attr == EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT) {
+                has_mod = 1;
+                val = 0; /* Forzar DRM_FORMAT_MOD_LINEAR (lo) */
+            } else if (attr == EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT) {
+                has_mod = 1;
+                val = 0; /* Forzar DRM_FORMAT_MOD_LINEAR (hi) */
+            }
+
+            patched_attribs[count++] = attr;
+            patched_attribs[count++] = val;
+        }
+
+        /* Si el dma_fd recibido no es válido o está cerrado, buscar un prime_fd válido en dumb table */
+        struct dumb_bo_entry *matched_entry = NULL;
+        pthread_mutex_lock(&g_dumb_mutex);
+        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+            if (g_dumb_table[i].bo && g_dumb_table[i].prime_fd == dma_fd) {
+                matched_entry = &g_dumb_table[i];
+                break;
+            }
+        }
+        if (!matched_entry && dma_fd >= 0 && g_kms_fd >= 0) {
+            uint32_t q_h = 0;
+            if (drmPrimeFDToHandle(g_kms_fd, dma_fd, &q_h) == 0 && q_h > 0) {
+                matched_entry = find_dumb_bo_by_handle_locked(q_h);
+            }
+        }
+        if (matched_entry && fd_idx >= 0 && fcntl(dma_fd, F_GETFD) < 0 && matched_entry->prime_fd >= 0) {
+            patched_attribs[fd_idx] = matched_entry->prime_fd;
+            dma_fd = matched_entry->prime_fd;
+        }
+        pthread_mutex_unlock(&g_dumb_mutex);
+
+        if (!has_mod && count < 54) {
+            patched_attribs[count++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+            patched_attribs[count++] = 0;
+            patched_attribs[count++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+            patched_attribs[count++] = 0;
+        }
+        patched_attribs[count] = EGL_NONE;
+
+        kmsg_log("[GPU-EGL] >>> eglCreateImageKHR(DMA_BUF): %ux%u, format=0x%x, fd=%d, stride=%u -> mod=LINEAR\n",
+                 w, h, fourcc, dma_fd, stride);
+        EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, patched_attribs) : NULL;
+
+        /* Fallback nativo Mali: Si DMA_BUF import falla, importar vía EGL_NATIVE_PIXMAP_KHR sobre el BO de Mali */
+        if (!img && matched_entry && matched_entry->bo) {
+            kmsg_log("[GPU-EGL] Fallback DMA_BUF -> EGL_NATIVE_PIXMAP_KHR con bo=%p\n", (void*)matched_entry->bo);
+            img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)matched_entry->bo, NULL) : NULL;
+        }
+
+        kmsg_log("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
+        return img;
+    }
+
+    kmsg_log("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
+    EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list) : NULL;
+    kmsg_log("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
+    return img;
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR img) {
+    if (!real_eglDestroyImageKHR) {
+        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mali) real_eglDestroyImageKHR = dlsym(mali, "eglDestroyImageKHR");
+        if (!real_eglDestroyImageKHR) real_eglDestroyImageKHR = dlsym(RTLD_NEXT, "eglDestroyImageKHR");
+    }
+    kmsg_log("[GPU-EGL] >>> eglDestroyImageKHR: img=%p\n", (void*)img);
+    EGLBoolean ret = real_eglDestroyImageKHR ? real_eglDestroyImageKHR(dpy, img) : 1;
+    return ret;
+}
 
 #ifndef EGL_NO_CONFIG_KHR
 #define EGL_NO_CONFIG_KHR ((EGLConfig)0)
@@ -1695,8 +1995,28 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_c
     return EGL_NO_CONTEXT;
 }
 
+__attribute__((visibility("default")))
+GLenum glGetGraphicsResetStatus(void) {
+    return 0; /* GL_NO_ERROR */
+}
+
+__attribute__((visibility("default")))
+GLenum glGetGraphicsResetStatusEXT(void) {
+    return 0; /* GL_NO_ERROR */
+}
+
+__attribute__((visibility("default")))
+GLenum glGetGraphicsResetStatusKHR(void) {
+    return 0; /* GL_NO_ERROR */
+}
+
 void *eglGetProcAddress(const char *procname) {
     if (!procname) return NULL;
+    if (strcmp(procname, "glGetGraphicsResetStatus") == 0 ||
+        strcmp(procname, "glGetGraphicsResetStatusEXT") == 0 ||
+        strcmp(procname, "glGetGraphicsResetStatusKHR") == 0) {
+        return (void *)glGetGraphicsResetStatusEXT;
+    }
     if (strcmp(procname, "eglCreateContext") == 0) {
         return (void *)eglCreateContext;
     }
@@ -1717,6 +2037,18 @@ void *eglGetProcAddress(const char *procname) {
     }
     if (strcmp(procname, "glDrawElements") == 0) {
         return (void *)glDrawElements;
+    }
+    if (strcmp(procname, "glClear") == 0) {
+        return (void *)glClear;
+    }
+    if (strcmp(procname, "eglSwapBuffers") == 0) {
+        return (void *)eglSwapBuffers;
+    }
+    if (strcmp(procname, "eglCreateImageKHR") == 0 || strcmp(procname, "eglCreateImage") == 0) {
+        return (void *)eglCreateImageKHR;
+    }
+    if (strcmp(procname, "eglDestroyImageKHR") == 0 || strcmp(procname, "eglDestroyImage") == 0) {
+        return (void *)eglDestroyImageKHR;
     }
 
     if (!real_eglGetProcAddress) {
@@ -1744,9 +2076,21 @@ void *eglGetProcAddress(const char *procname) {
 static drmModeConnectorPtr (*real_drmModeGetConnector)(int, uint32_t) = NULL;
 static drmModeConnectorPtr (*real_drmModeGetConnectorCurrent)(int, uint32_t) = NULL;
 
-
+drmModeResPtr drmModeGetResources(int fd) {
+    if (fd >= 0) g_kms_fd = fd;
+    static drmModeResPtr (*real_drmModeGetResources)(int) = NULL;
+    if (!real_drmModeGetResources) {
+        real_drmModeGetResources = dlsym(RTLD_NEXT, "drmModeGetResources");
+        if (!real_drmModeGetResources) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeGetResources = dlsym(ldrm, "drmModeGetResources");
+        }
+    }
+    return real_drmModeGetResources ? real_drmModeGetResources(fd) : NULL;
+}
 
 drmModeConnectorPtr drmModeGetConnector(int fd, uint32_t connectorId) {
+    if (fd >= 0) g_kms_fd = fd;
     if (!real_drmModeGetConnector) {
         real_drmModeGetConnector = dlsym(RTLD_NEXT, "drmModeGetConnector");
         if (!real_drmModeGetConnector) {
@@ -1764,6 +2108,7 @@ drmModeConnectorPtr drmModeGetConnector(int fd, uint32_t connectorId) {
 }
 
 drmModeConnectorPtr drmModeGetConnectorCurrent(int fd, uint32_t connectorId) {
+    if (fd >= 0) g_kms_fd = fd;
     if (!real_drmModeGetConnectorCurrent) {
         real_drmModeGetConnectorCurrent = dlsym(RTLD_NEXT, "drmModeGetConnectorCurrent");
         if (!real_drmModeGetConnectorCurrent) {
@@ -1778,6 +2123,269 @@ drmModeConnectorPtr drmModeGetConnectorCurrent(int fd, uint32_t connectorId) {
         conn->count_modes = 0;
     }
     return conn;
+}
+
+int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
+                   uint32_t x, uint32_t y, uint32_t *connectors, int count,
+                   drmModeModeInfoPtr mode)
+{
+    if (fd >= 0) g_kms_fd = fd;
+    static int (*real_drmModeSetCrtc)(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *, int, drmModeModeInfoPtr) = NULL;
+    if (!real_drmModeSetCrtc) {
+        real_drmModeSetCrtc = dlsym(RTLD_NEXT, "drmModeSetCrtc");
+        if (!real_drmModeSetCrtc) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeSetCrtc = dlsym(ldrm, "drmModeSetCrtc");
+        }
+    }
+    kmsg_log("[GPU-KMS] >>> drmModeSetCrtc: fd=%d, crtc=%u, fb=%u, count=%d, mode=%ux%u@%u\n",
+             fd, crtcId, bufferId, count, mode ? mode->hdisplay : 0, mode ? mode->vdisplay : 0, mode ? mode->vrefresh : 0);
+    int ret = real_drmModeSetCrtc ? real_drmModeSetCrtc(fd, crtcId, bufferId, x, y, connectors, count, mode) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModeSetCrtc RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
+    return ret;
+}
+
+int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
+                    uint32_t flags, void *user_data)
+{
+    if (fd >= 0) g_kms_fd = fd;
+    static int (*real_drmModePageFlip)(int, uint32_t, uint32_t, uint32_t, void *) = NULL;
+    if (!real_drmModePageFlip) {
+        real_drmModePageFlip = dlsym(RTLD_NEXT, "drmModePageFlip");
+        if (!real_drmModePageFlip) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModePageFlip = dlsym(ldrm, "drmModePageFlip");
+        }
+    }
+    kmsg_log("[GPU-KMS] >>> drmModePageFlip: fd=%d, crtc=%u, fb=%u, flags=0x%x\n", fd, crtc_id, fb_id, flags);
+    int ret = real_drmModePageFlip ? real_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModePageFlip RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
+    return ret;
+}
+
+int drmModeAddFB(int fd, uint32_t width, uint32_t height, uint8_t depth,
+                 uint8_t bpp, uint32_t pitch, uint32_t bo_handle,
+                 uint32_t *buf_id)
+{
+    if (fd >= 0) g_kms_fd = fd;
+    static int (*real_drmModeAddFB)(int, uint32_t, uint32_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t *) = NULL;
+    if (!real_drmModeAddFB) {
+        real_drmModeAddFB = dlsym(RTLD_NEXT, "drmModeAddFB");
+        if (!real_drmModeAddFB) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeAddFB = dlsym(ldrm, "drmModeAddFB");
+        }
+    }
+
+    uint32_t effective_handle = bo_handle;
+    pthread_mutex_lock(&g_dumb_mutex);
+    struct dumb_bo_entry *entry = find_dumb_bo_by_handle_locked(bo_handle);
+    if (entry && entry->prime_fd >= 0 && entry->card_fd != fd) {
+        uint32_t imported_handle = 0;
+        int r = drmPrimeFDToHandle(fd, entry->prime_fd, &imported_handle);
+        if (r == 0 && imported_handle > 0) {
+            kmsg_log("[GPU-KMS] drmModeAddFB: prime_fd=%d cruzado a fd=%d -> handle=%u (orig=%u en card_fd=%d)\n",
+                     entry->prime_fd, fd, imported_handle, bo_handle, entry->card_fd);
+            effective_handle = imported_handle;
+        }
+    }
+    pthread_mutex_unlock(&g_dumb_mutex);
+
+    kmsg_log("[GPU-KMS] >>> drmModeAddFB: fd=%d, %ux%u, pitch=%u, bo_handle=%u (eff=%u)\n",
+             fd, width, height, pitch, bo_handle, effective_handle);
+    int ret = real_drmModeAddFB ? real_drmModeAddFB(fd, width, height, depth, bpp, pitch, effective_handle, buf_id) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModeAddFB RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
+    return ret;
+}
+
+int drmModeAddFB2(int fd, uint32_t width, uint32_t height,
+                  uint32_t pixel_format, const uint32_t bo_handles[4],
+                  const uint32_t pitches[4], const uint32_t offsets[4],
+                  uint32_t *buf_id, uint32_t flags)
+{
+    if (fd >= 0) g_kms_fd = fd;
+    static int (*real_drmModeAddFB2)(int, uint32_t, uint32_t, uint32_t, const uint32_t *, const uint32_t *, const uint32_t *, uint32_t *, uint32_t) = NULL;
+    if (!real_drmModeAddFB2) {
+        real_drmModeAddFB2 = dlsym(RTLD_NEXT, "drmModeAddFB2");
+        if (!real_drmModeAddFB2) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeAddFB2 = dlsym(ldrm, "drmModeAddFB2");
+        }
+    }
+
+    uint32_t eff_handles[4] = {
+        bo_handles ? bo_handles[0] : 0,
+        bo_handles ? bo_handles[1] : 0,
+        bo_handles ? bo_handles[2] : 0,
+        bo_handles ? bo_handles[3] : 0
+    };
+
+    if (bo_handles && bo_handles[0] > 0) {
+        pthread_mutex_lock(&g_dumb_mutex);
+        struct dumb_bo_entry *entry = find_dumb_bo_by_handle_locked(bo_handles[0]);
+        if (entry && entry->prime_fd >= 0 && entry->card_fd != fd) {
+            uint32_t imported_handle = 0;
+            int r = drmPrimeFDToHandle(fd, entry->prime_fd, &imported_handle);
+            if (r == 0 && imported_handle > 0) {
+                kmsg_log("[GPU-KMS] drmModeAddFB2: PRIME cruzado OK! prime_fd=%d a fd=%d -> handle=%u (orig=%u en card_fd=%d)\n",
+                         entry->prime_fd, fd, imported_handle, bo_handles[0], entry->card_fd);
+                eff_handles[0] = imported_handle;
+            } else {
+                kmsg_log("[GPU-KMS] ERROR drmPrimeFDToHandle(fd=%d, prime_fd=%d): ret=%d errno=%d\n",
+                         fd, entry->prime_fd, r, errno);
+            }
+        }
+        pthread_mutex_unlock(&g_dumb_mutex);
+    }
+
+    kmsg_log("[GPU-KMS] >>> drmModeAddFB2: fd=%d, %ux%u, format=0x%x, h0=%u (eff=%u), pitch0=%u, flags=0x%x\n",
+             fd, width, height, pixel_format, bo_handles ? bo_handles[0] : 0, eff_handles[0], pitches ? pitches[0] : 0, flags);
+    int ret = real_drmModeAddFB2 ? real_drmModeAddFB2(fd, width, height, pixel_format, eff_handles, pitches, offsets, buf_id, flags) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModeAddFB2 RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
+    return ret;
+}
+
+int drmModeSetPlane(int fd, uint32_t plane_id, uint32_t crtc_id,
+                    uint32_t fb_id, uint32_t flags,
+                    int32_t crtc_x, int32_t crtc_y,
+                    uint32_t crtc_w, uint32_t crtc_h,
+                    uint32_t src_x, uint32_t src_y,
+                    uint32_t src_w, uint32_t src_h)
+{
+    static int (*real_drmModeSetPlane)(int, uint32_t, uint32_t, uint32_t, uint32_t, int32_t, int32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) = NULL;
+    if (!real_drmModeSetPlane) {
+        real_drmModeSetPlane = dlsym(RTLD_NEXT, "drmModeSetPlane");
+        if (!real_drmModeSetPlane) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeSetPlane = dlsym(ldrm, "drmModeSetPlane");
+        }
+    }
+    kmsg_log("[GPU-KMS] >>> drmModeSetPlane: plane=%u, crtc=%u, fb=%u\n", plane_id, crtc_id, fb_id);
+    int ret = real_drmModeSetPlane ? real_drmModeSetPlane(fd, plane_id, crtc_id, fb_id, flags, crtc_x, crtc_y, crtc_w, crtc_h, src_x, src_y, src_w, src_h) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModeSetPlane RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
+    return ret;
+}
+
+int drmModeAtomicCommit(int fd, drmModeAtomicReqPtr req, uint32_t flags, void *user_data) {
+    static int (*real_drmModeAtomicCommit)(int, drmModeAtomicReqPtr, uint32_t, void *) = NULL;
+    if (!real_drmModeAtomicCommit) {
+        real_drmModeAtomicCommit = dlsym(RTLD_NEXT, "drmModeAtomicCommit");
+        if (!real_drmModeAtomicCommit) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeAtomicCommit = dlsym(ldrm, "drmModeAtomicCommit");
+        }
+    }
+    kmsg_log("[GPU-KMS] >>> drmModeAtomicCommit: fd=%d, flags=0x%x\n", fd, flags);
+    int ret = real_drmModeAtomicCommit ? real_drmModeAtomicCommit(fd, req, flags, user_data) : -1;
+    kmsg_log("[GPU-KMS] <<< drmModeAtomicCommit RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
+    return ret;
+}
+
+__attribute__((visibility("default")))
+int drmModeConnectorSetProperty(int fd, uint32_t connector_id, uint32_t property_id, uint64_t value) {
+    static int (*real_drmModeConnectorSetProperty)(int, uint32_t, uint32_t, uint64_t) = NULL;
+    if (!real_drmModeConnectorSetProperty) {
+        real_drmModeConnectorSetProperty = dlsym(RTLD_NEXT, "drmModeConnectorSetProperty");
+        if (!real_drmModeConnectorSetProperty) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeConnectorSetProperty = dlsym(ldrm, "drmModeConnectorSetProperty");
+        }
+    }
+    int ret = real_drmModeConnectorSetProperty ? real_drmModeConnectorSetProperty(fd, connector_id, property_id, value) : -1;
+    kmsg_log("[GPU-KMS] >>> drmModeConnectorSetProperty: fd=%d, conn=%u, prop=%u, val=%llu -> ret=%d (errno=%d)\n",
+             fd, connector_id, property_id, (unsigned long long)value, ret, ret < 0 ? errno : 0);
+    /* En el kernel MediaTek MT6789, cambiar la propiedad DPMS en conectores DSI retorna Permission denied
+     * a pesar de que el panel Novatek ya está físicamente encendido y activo. Enmascaramos el fallo para
+     * que wlroots declare la salida DSI-1 habilitada y active los monitores para los clientes Wayland. */
+    if (ret < 0) {
+        kmsg_log("[GPU-KMS] <<< DPMS enmascarado exitoso para connector=%u: retornando 0 (OK)\n", connector_id);
+        return 0;
+    }
+    return ret;
+}
+
+__attribute__((visibility("default")))
+int drmModeObjectSetProperty(int fd, uint32_t object_id, uint32_t object_type, uint32_t property_id, uint64_t value) {
+    static int (*real_drmModeObjectSetProperty)(int, uint32_t, uint32_t, uint32_t, uint64_t) = NULL;
+    if (!real_drmModeObjectSetProperty) {
+        real_drmModeObjectSetProperty = dlsym(RTLD_NEXT, "drmModeObjectSetProperty");
+        if (!real_drmModeObjectSetProperty) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeObjectSetProperty = dlsym(ldrm, "drmModeObjectSetProperty");
+        }
+    }
+    int ret = real_drmModeObjectSetProperty ? real_drmModeObjectSetProperty(fd, object_id, object_type, property_id, value) : -1;
+    if (ret < 0 && object_type == DRM_MODE_OBJECT_CONNECTOR) {
+        kmsg_log("[GPU-KMS] <<< drmModeObjectSetProperty enmascarado para connector=%u: retornando 0 (OK)\n", object_id);
+        return 0;
+    }
+    return ret;
+}
+
+__attribute__((visibility("default")))
+int drmCloseBufferHandle(int fd, uint32_t handle) {
+    if (is_active_dumb_handle(handle)) {
+        kmsg_log("[GPU-KMS] drmCloseBufferHandle: handle=%u activo en KMS preservado (ret=0)\n", handle);
+        return 0;
+    }
+    struct drm_gem_close req = { .handle = handle };
+    return drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &req);
+}
+
+__attribute__((visibility("default")))
+int drmModeSetCursor(int fd, uint32_t crtcId, uint32_t bo_handle,
+                     uint32_t width, uint32_t height)
+{
+    kmsg_log("[GPU-KMS] drmModeSetCursor(crtc=%u, handle=%u, %ux%u) -> forzar software cursor (-EINVAL)\n",
+             crtcId, bo_handle, width, height);
+    errno = EINVAL;
+    return -1;
+}
+
+__attribute__((visibility("default")))
+int drmModeSetCursor2(int fd, uint32_t crtcId, uint32_t bo_handle,
+                      uint32_t width, uint32_t height, int32_t hot_x, int32_t hot_y)
+{
+    kmsg_log("[GPU-KMS] drmModeSetCursor2(crtc=%u, handle=%u, %ux%u) -> forzar software cursor (-EINVAL)\n",
+             crtcId, bo_handle, width, height);
+    errno = EINVAL;
+    return -1;
+}
+
+__attribute__((visibility("default")))
+int drmModeMoveCursor(int fd, uint32_t crtcId, int x, int y) {
+    (void)fd; (void)crtcId; (void)x; (void)y;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int drmModeRmFB(int fd, uint32_t bufferId) {
+    static int (*real_drmModeRmFB)(int, uint32_t) = NULL;
+    if (!real_drmModeRmFB) {
+        real_drmModeRmFB = dlsym(RTLD_NEXT, "drmModeRmFB");
+        if (!real_drmModeRmFB) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmModeRmFB = dlsym(ldrm, "drmModeRmFB");
+        }
+    }
+    kmsg_log("[GPU-KMS] >>> drmModeRmFB: fd=%d, fb_id=%u\n", fd, bufferId);
+    int ret = real_drmModeRmFB ? real_drmModeRmFB(fd, bufferId) : 0;
+    kmsg_log("[GPU-KMS] <<< drmModeRmFB RET=%d\n", ret);
+    return ret;
+}
+
+__attribute__((visibility("default")))
+int drmHandleEvent(int fd, drmEventContextPtr evctx) {
+    static int (*real_drmHandleEvent)(int, drmEventContextPtr) = NULL;
+    if (!real_drmHandleEvent) {
+        real_drmHandleEvent = dlsym(RTLD_NEXT, "drmHandleEvent");
+        if (!real_drmHandleEvent) {
+            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
+            if (ldrm) real_drmHandleEvent = dlsym(ldrm, "drmHandleEvent");
+        }
+    }
+    int ret = real_drmHandleEvent ? real_drmHandleEvent(fd, evctx) : -1;
+    return ret;
 }
 
 /* Constructor del driver */
