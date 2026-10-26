@@ -580,6 +580,38 @@ El objetivo absoluto e inquebrantable para la siguiente sesión es **renderizar 
      - `/usr/libexec/phosh -U` (GNOME Mobile Shell en PIDs 17448 y 25196).
      - `foot` (Terminal Wayland en PID 7952).
   5. Decenas de miles de átomos de renderizado procesados por la GPU física ARM Mali-G57 MC2 (`ioctl JOB_SUBMIT ret=0 status=1`).
-  6. **Uptime continuo superior a 15 minutos ininterrumpidos** con telemetría de batería estable, retroiluminación blindada en 15/255 y frecuencia fijada en OPP 37 (390 MHz @ 575 mV).
+  6. **Uptime continuo superior a 50 minutos ininterrumpidos** con telemetría de batería estable, retroiluminación blindada en 15/255 y frecuencia fijada en OPP 37 (390 MHz @ 575 mV).
+
+---
+
+## 9. Empaquetado, Flasheo y Verificación del Arranque Permanente v16 (`version_v16_estable`)
+
+Para consolidar la aceleración por hardware en la GPU ARM Mali-G57 MC2 de manera autónoma y permanente, se creó la release oficial de arranque **postmarketOS v16.0 Estable**:
+
+### A. Generador de Arranque Modular (`build_pmos_boot_v16.py`)
+- Embebe directamente en el ramdisk CPIO (`pmos_initramfs_v16.gz`, 30.1 MB):
+  1. `libgpu_interface_driver.so` Driver v11 (`caf18ad92b76da6a7f61d68b7edd03d903c83abadefe58f9015a35ae62a78701`).
+  2. `mali_kbase_mt6789_patched.ko` (`97aab5934ea64b60a62d0e6826ecf4ac21022a83c51692b1e47676b85e36ae30`) inyectado en `lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/`.
+  3. `libseat_direct.so` (`b78332e93750fe9585fc1bf0d95849e2bb72ee349d6533219350d53a245307e6`).
+  4. Cadena de arranque Mali (`load_mali_chain.sh`) con fijación estricta de OPP 37 (390 MHz @ 575 mV, 153 mW) y permisos `0666` en `/dev/mali0`.
+  5. Scripts supervisores `start_phosh.sh`, `start_phosh_service.sh` y `phosh_wrapper.sh`.
+  6. Configuraciones de display `phoc.ini` (escala 1.0, orientación 180°, writeback desactivado).
+  7. Centinela de hardware `wdt_pet` alimentando `/dev/watchdog0` cada 500 ms y `backlight_guard` fijando el brillo en 15/255.
+- **Hook de Arranque Autónomo en `/init`:**
+  Tras montar el rootfs en `/sysroot` y los pseudo-sistemas de archivos, `/init` copia automáticamente los controladores y scripts actualizados a `/sysroot` e inicia en segundo plano supervisado `/bin/start_phosh_service.sh > /sysroot/var/log/phosh_service_boot.log 2>&1 &`, permitiendo que la tablet arranque directamente al entorno gráfico Phosh acelerado por GPU sin intervención de la PC.
+
+### B. Flasheo en Vivo y Verificación Criptográfica en Silicio Real
+Mediante streaming directo de bajo nivel por TCP sobre la red interna USB (`flash_live_v16.py`):
+1. **Particiones de Arranque Primarias y Secundarias Flasheadas:**
+   - `boot_a` (`/dev/sdc28`) y `boot_b` (`/dev/sdc51`): Flasheadas con `pmos_boot_v16.img` (64 MB, Header v4 + AVB Footer).
+   - `vendor_boot_a` (`/dev/sdc29`) y `vendor_boot_b` (`/dev/sdc52`): Flasheadas con `vendor_boot_pmos_v16.img` (64 MB, Header v4 + AVB Footer).
+2. **Verificación de Sumas de Verificación MD5 en Bloques Físicos de la Tablet:**
+   - `boot_a` (`/dev/sdc28`): `d0333ae005e15b9ff6dbe1e45b446e20` (COINCIDENCIA 100%)
+   - `boot_b` (`/dev/sdc51`): `d0333ae005e15b9ff6dbe1e45b446e20` (COINCIDENCIA 100%)
+   - `vendor_boot_a` (`/dev/sdc29`): `f78b88ffb60695c70ffca571a81678d9` (COINCIDENCIA 100%)
+   - `vendor_boot_b` (`/dev/sdc52`): `f78b88ffb60695c70ffca571a81678d9` (COINCIDENCIA 100%)
+3. **Respaldo Integral de Seguridad:**
+   - Generado y preservado `sysroot_v16_config_backup.tar.gz` (224.95 MB) con todas las configuraciones de usuario, servicios systemd, wrappers de aceleración GPU y perfiles de audio/batería.
+
 
 

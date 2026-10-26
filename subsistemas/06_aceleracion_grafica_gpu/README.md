@@ -247,6 +247,9 @@ chroot /sysroot env LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.
 | `patch_libmali.py` | Script que modifica el driver DDK de ARM para admitir la GPU Mali-G57 y neutralizar excepciones C++ |
 | `libmali_shim.c` | Código fuente en C del puente de compatibilidad ABI musl <-> glibc y traducción de ioctl KBASE |
 | `Makefile` | Reglas de compilación para generar `libgpu_interface_driver.so` y `libmali_shim.so` |
-| `load_mali_chain.sh` | Script shell que carga todos los módulos dependientes de MediaTek en el orden estricto de arranque |
+| `load_mali_chain.sh` | Script shell que carga todos los módulos dependientes de MediaTek en el orden estricto de arranque y bloquea OPP 37 |
+| `start_phosh.sh` | Script supervisor que arranca compositor Phoc + Phosh GNOME Mobile con aceleración GPU Mali-G57 y soporte de software cursor |
+| `start_phosh_service.sh` | Wrapper de arranque autónomo para invocar start_phosh.sh asegurando blindaje de brillo en 15/255 |
+| `phosh_wrapper.sh` | Wrapper de entorno para iniciar `/usr/libexec/phosh -U` con aislamiento de variables Wayland y D-Bus |
 | `test_mali_render.py` | Suite de prueba en Python usando `ctypes` que verifica todo el pipeline EGL 1.5 / OpenGL ES 3.2 |
 | `README.md` | Esta documentación técnica exhaustiva |
