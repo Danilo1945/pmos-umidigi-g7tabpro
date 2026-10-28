@@ -31,41 +31,45 @@ def run_remote_serial(cmd, tty_path='/dev/ttyACM0', timeout=4.0):
     except Exception as e:
         return f"ERROR SERIAL: {e}\n"
 
-def run_remote(cmd, ip='172.16.42.1', port=23, timeout=8.0):
+def run_remote(cmd, ip='172.16.42.1', port=2323, timeout=6.0):
     import time
     token = b'__CMD_FINISHED_MARKER__'
-    try:
-        s = socket.socket()
-        s.settimeout(timeout)
-        s.connect((ip, port))
-        time.sleep(0.1)
+    for p in [port, 23]:
         try:
-            s.recv(1024)
-        except Exception:
-            pass
-        wrapped_cmd = f"\nexport PAGER=cat; ({cmd})\necho {token.decode()}\n"
-        s.sendall(wrapped_cmd.encode('utf-8'))
-        out = b''
-        start = time.time()
-        while time.time() - start < timeout:
+            s = socket.socket()
+            s.settimeout(timeout)
+            s.connect((ip, p))
+            time.sleep(0.1)
             try:
-                chunk = s.recv(4096)
-                if not chunk:
+                s.recv(1024)
+            except Exception:
+                pass
+            wrapped_cmd = f"\nexport PAGER=cat; ({cmd})\necho {token.decode()}\n"
+            s.sendall(wrapped_cmd.encode('utf-8'))
+            out = b''
+            start = time.time()
+            while time.time() - start < timeout:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    out += chunk
+                    if token in out:
+                        break
+                except socket.timeout:
                     break
-                out += chunk
-                if token in out:
-                    break
-            except socket.timeout:
-                break
-        s.close()
-        text = out.decode('utf-8', errors='replace')
-        lines = [l for l in text.splitlines() if token.decode() not in l and not l.startswith('export PAGER=cat') and not l.startswith('(') and not l.endswith(f'echo {token.decode()}') and not l.startswith('~ #') and not '\x1b[' in l]
-        return '\n'.join(lines).strip() + '\n'
-    except Exception:
-        # Fallback a consola serie USB /dev/ttyACM0
-        if os.path.exists('/dev/ttyACM0'):
-            return run_remote_serial(cmd)
-        return "ERROR: Connection failed (both TCP and Serial unavailable)\n"
+            s.close()
+            import re
+            ansi_regex = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+            lines = []
+            for l in out.decode('utf-8', errors='replace').splitlines():
+                cleaned = ansi_regex.sub('', l)
+                if token.decode() not in cleaned and not cleaned.startswith('export PAGER=cat') and not cleaned.startswith('(') and not cleaned.endswith(f'echo {token.decode()}') and not cleaned.startswith('~ #'):
+                    lines.append(cleaned)
+            return '\n'.join(lines).strip() + '\n'
+        except Exception:
+            continue
+    return "ERROR: Connection failed to TCP ports\n"
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:

@@ -6,6 +6,16 @@
 set +e
 echo "=== INICIANDO CADENA DE CONTROLADORES GPU MALI-G57 ==="
 
+# Si mali_kbase ya está cargado, asegurar solo permisos y OPP 37
+if grep -q "mali_kbase" /proc/modules 2>/dev/null; then
+    echo "mali_kbase ya activo. Asegurando permisos y OPP 37..."
+    chmod 666 /dev/mali0 /sysroot/dev/mali0 /dev/dri/* /sysroot/dev/dri/* 2>/dev/null || true
+    if [ -d /proc/gpufreqv2 ]; then
+        echo 37 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
+    fi
+    exit 0
+fi
+
 # Blindar brillo inmediatamente en 15/255 (anti-UVLO)
 echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 

@@ -20,14 +20,17 @@ int main(void) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
 
-    int fd = open(BACKLIGHT_PATH, O_RDWR);
-    if (fd < 0) {
-        perror("Error abriendo " BACKLIGHT_PATH);
-        return 1;
-    }
-
+    int fd = -1;
     char buf[32];
     while (running) {
+        if (fd < 0) {
+            fd = open(BACKLIGHT_PATH, O_RDWR);
+            if (fd < 0) {
+                usleep(50000); // 50 ms espera nodo sysfs
+                continue;
+            }
+        }
+
         lseek(fd, 0, SEEK_SET);
         int n = read(fd, buf, sizeof(buf) - 1);
         if (n > 0) {
@@ -35,15 +38,21 @@ int main(void) {
             int val = atoi(buf);
             if (val != TARGET_VAL) {
                 lseek(fd, 0, SEEK_SET);
-                write(fd, TARGET_BRIGHTNESS, strlen(TARGET_BRIGHTNESS));
+                if (write(fd, TARGET_BRIGHTNESS, strlen(TARGET_BRIGHTNESS)) < 0) {
+                    close(fd);
+                    fd = -1;
+                }
             }
         } else {
             lseek(fd, 0, SEEK_SET);
-            write(fd, TARGET_BRIGHTNESS, strlen(TARGET_BRIGHTNESS));
+            if (write(fd, TARGET_BRIGHTNESS, strlen(TARGET_BRIGHTNESS)) < 0) {
+                close(fd);
+                fd = -1;
+            }
         }
         usleep(50000); // 50 ms
     }
 
-    close(fd);
+    if (fd >= 0) close(fd);
     return 0;
 }

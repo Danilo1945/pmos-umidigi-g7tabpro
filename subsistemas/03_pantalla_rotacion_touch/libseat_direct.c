@@ -88,6 +88,29 @@ static size_t my_strlen(const char *s) {
     return len;
 }
 
+static void log_num(long val) {
+    char buf[32];
+    int i = 0;
+    if (val < 0) {
+        my_sys_write(2, "-", 1);
+        val = -val;
+    }
+    if (val == 0) {
+        my_sys_write(2, "0", 1);
+        return;
+    }
+    while (val > 0 && i < 30) {
+        buf[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    for (int j = 0; j < i / 2; j++) {
+        char tmp = buf[j];
+        buf[j] = buf[i - 1 - j];
+        buf[i - 1 - j] = tmp;
+    }
+    my_sys_write(2, buf, i);
+}
+
 static void log_msg(const char *msg) {
     if (msg) {
         my_sys_write(2, msg, my_strlen(msg));
@@ -136,9 +159,15 @@ int libseat_open_device(void *seat, const char *path, int *fd_out) {
     if (path && (path[0] == '/' && path[5] == 'd' && path[6] == 'r' && path[7] == 'i')) {
         long ret = my_sys_ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
         if (ret < 0) {
-            log_msg("[libseat-direct] ADVERTENCIA: DRM_IOCTL_SET_MASTER fallo (puede ser normal si ya somos master)\n");
+            log_msg("[libseat-direct] ADVERTENCIA: DRM_IOCTL_SET_MASTER fallo con ret=");
+            log_num(ret);
+            log_msg(" en fd=");
+            log_num(fd);
+            log_msg("\n");
         } else {
-            log_msg("[libseat-direct] DRM master adquirido OK en /dev/dri\n");
+            log_msg("[libseat-direct] DRM master adquirido OK en /dev/dri (fd=");
+            log_num(fd);
+            log_msg(")\n");
         }
     }
     *fd_out = fd;

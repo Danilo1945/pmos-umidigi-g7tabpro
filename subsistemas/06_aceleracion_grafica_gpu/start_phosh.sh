@@ -58,15 +58,20 @@ cat << 'PHOCEOF' > /sysroot/etc/phoc.ini
 xwayland=false
 
 [output:DSI-1]
+enable=true
 scale=1.0
 rotate=180
+mode=1200x1920@60.000Hz
 
 [output:Writeback-1]
+enable=false
+
+[output:Writeback-2]
 enable=false
 PHOCEOF
 cp -f /sysroot/etc/phoc.ini /etc/phoc.ini 2>/dev/null || true
 
-# 8. Creación de phosh_wrapper.sh con unset LD_PRELOAD
+# 8. Creación de phosh_wrapper.sh con entorno Wayland completo
 mkdir -p /usr/bin /sysroot/usr/bin
 cat << 'WRAPPEREOF' > /sysroot/usr/bin/phosh_wrapper.sh
 #!/bin/sh
@@ -74,7 +79,24 @@ unset LD_PRELOAD
 export HOME=/root
 export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
-exec /usr/libexec/phosh -U
+export WAYLAND_DISPLAY=wayland-0
+export GDK_BACKEND=wayland
+export QT_QPA_PLATFORM=wayland
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=GNOME:Phosh
+export XDG_SESSION_DESKTOP=phosh
+
+count=0
+while [ ! -S /tmp/runtime-root/wayland-0 ] && [ $count -lt 50 ]; do
+    sleep 0.1
+    count=$((count + 1))
+done
+
+# Esperar a que el compositor Phoc complete la inicializacion de KMS
+sleep 1.5
+
+echo "[wrapper] Lanzando sesion GNOME Mobile Phosh..." >> /var/log/phosh_user.log
+exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
 WRAPPEREOF
 chmod 755 /sysroot/usr/bin/phosh_wrapper.sh
 cp -f /sysroot/usr/bin/phosh_wrapper.sh /usr/bin/phosh_wrapper.sh 2>/dev/null || true
@@ -111,10 +133,16 @@ export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 export WLR_RENDERER=gles2
 export WLR_RENDERER_ALLOW_SOFTWARE=0
 export WLR_BACKENDS=drm,libinput
+export WLR_DRM_DEVICES=/dev/dri/card0
 export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_DRM_NO_ATOMIC=1
+
+# Asegurar que udev esté activo para DRM/KMS y dispositivos de entrada
+if ! pgrep -x udevd >/dev/null 2>&1; then
+    /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
+fi
 
 # 11. Variables de integración para clientes Wayland
 export EGL_PLATFORM=wayland

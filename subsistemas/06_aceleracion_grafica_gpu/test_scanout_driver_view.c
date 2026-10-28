@@ -105,8 +105,10 @@ int main() {
     printf("    drmModeSetCrtc ret=%d (EXITO = 0)\n", sret);
 
     printf(">>> LA PANTALLA DE LA TABLET ESTA MOSTRANDO VERDE ESMERALDA <<<\n");
-    printf("[9] Manteniendo frame en pantalla por 3 segundos...\n");
-    sleep(3);
+    printf(">>> MANTENIENDO PANTALLA ILUMINADA EN BUCLE INDEFINIDO <<<\n");
+    while (1) {
+        sleep(10);
+    }
 
     printf("=== DEMOSTRACION COMPLETADA CON EXITO TOTAL ===\n");
     _exit(0);
