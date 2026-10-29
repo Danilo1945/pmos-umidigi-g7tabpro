@@ -19,9 +19,10 @@ MISC_A = "/home/danilo/Documentos/TABLET/misc_stock_backup.img"
 
 # Lista de particiones a sincronizar una a una
 TAREAS = [
-    ("misc", MISC_A, "Restaurar Slot A como activo"),
+    ("boot_a", BOOT_IMG, "Flashear boot_a con v16 sin auto-phoc"),
     ("boot_b", BOOT_IMG, "Sincronizar boot_b con v16"),
-    ("vendor_boot_b", VENDOR_BOOT_IMG, "Sincronizar vendor_boot_b con v16")
+    ("vendor_boot_b", VENDOR_BOOT_IMG, "Sincronizar vendor_boot_b con v16"),
+    ("misc", MISC_A, "Restaurar Slot A como activo")
 ]
 
 subprocess.run("sudo systemctl stop ModemManager 2>/dev/null || true", shell=True)

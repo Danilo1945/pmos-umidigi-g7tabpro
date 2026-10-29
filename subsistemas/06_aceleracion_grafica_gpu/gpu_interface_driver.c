@@ -366,6 +366,7 @@ int __sprintf_chk(char *str, int flag, size_t slen, const char *format, ...) {
 /* ========================================================================= */
 
 static inline void flush_dcache_range(uint64_t addr, size_t size) {
+    if (addr < 0x100000ULL) return; /* Prevenir Data Abort en VAs de GPU no mapeadas en CPU */
     uintptr_t start = (uintptr_t)addr & ~63ULL;
     uintptr_t end = ((uintptr_t)addr + size + 63ULL) & ~63ULL;
     for (uintptr_t p = start; p < end; p += 64) {
@@ -424,52 +425,74 @@ struct kbase_ioctl_version_check {
 
 #define MAX_BOUNCE_FDS 256
 struct bounce_buffer {
-    uint64_t base;
+    uint64_t cpu_base;
+    uint64_t gpu_base;
     uint32_t rolling_idx;
 };
 static struct bounce_buffer g_bounce_table[MAX_BOUNCE_FDS];
 
-static uint64_t get_bounce_slot(int fd) {
-    if (fd < 0 || fd >= MAX_BOUNCE_FDS) return 0;
-    if (g_bounce_table[fd].base == 0) {
-        /* Reservar 256 páginas (1 MB) = 4096 slots de 256 bytes exclusivos para re-alineación de Job Descriptors */
-        union {
-            struct {
-                uint64_t va_pages;
-                uint64_t commit_pages;
-                uint64_t extent;
-                uint64_t flags;
-            } in;
-            struct {
-                uint64_t flags;
-                uint64_t gpu_va;
-            } out;
-        } alloc;
-        memset(&alloc, 0, sizeof(alloc));
-        alloc.in.va_pages = 256;
-        alloc.in.commit_pages = 256;
-        alloc.in.extent = 0;
-        alloc.in.flags = 0x204f; /* CPU_RD|WR, GPU_RD|WR, COHERENT_LOCAL, SAME_VA */
+static int ensure_bounce_buffer(int fd) {
+    if (fd < 0 || fd >= MAX_BOUNCE_FDS) return -1;
+    if (g_bounce_table[fd].cpu_base != 0) return 0;
 
-        long ret = syscall(SYS_ioctl, fd, 0xc0208005, &alloc);
-        if (ret >= 0) {
-            void *ptr = mmap(NULL, 256 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, alloc.out.gpu_va);
-            if (ptr != MAP_FAILED) {
-                g_bounce_table[fd].base = (uint64_t)(uintptr_t)ptr;
-                g_bounce_table[fd].rolling_idx = 0;
-                kmsg_always("[VALHALL_BOUNCE] Bounce buffer dinámico asignado para fd=%d: base=0x%llx (1MB / 4096 slots)\n",
-                            fd, (unsigned long long)g_bounce_table[fd].base);
-            } else {
-                kmsg_always("[VALHALL_BOUNCE] ERROR: mmap fallo para fd=%d (errno=%d)\n", fd, errno);
-                return 0;
-            }
-        } else {
-            kmsg_always("[VALHALL_BOUNCE] ERROR: ioctl MEM_ALLOC (0xc0208005) fallo para fd=%d ret=%ld (errno=%d)\n", fd, ret, errno);
-            return 0;
+    /* Reservar 256 páginas (1 MB) = 4096 slots de 256 bytes exclusivos para re-alineación de Job Descriptors */
+    union {
+        struct {
+            uint64_t va_pages;
+            uint64_t commit_pages;
+            uint64_t extent;
+            uint64_t flags;
+        } in;
+        struct {
+            uint32_t flags;
+            uint32_t pad;
+            uint64_t gpu_va;
+        } out;
+    } alloc;
+    memset(&alloc, 0, sizeof(alloc));
+    alloc.in.va_pages = 256;
+    alloc.in.commit_pages = 256;
+    alloc.in.extent = 0;
+    alloc.in.flags = 0x17; /* BASE_MEM_PROT_CPU_RD|WR, BASE_MEM_PROT_GPU_RD|WR, BASE_MEM_SAME_VA (0x10) */
+
+    long ret = syscall(SYS_ioctl, fd, 0xc0208005, &alloc);
+    if (ret >= 0 && alloc.out.gpu_va != 0) {
+        void *ptr = mmap((void *)(uintptr_t)alloc.out.gpu_va, 256 * 4096,
+                         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                         fd, alloc.out.gpu_va);
+        if (ptr == MAP_FAILED) {
+            ptr = mmap(NULL, 256 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, alloc.out.gpu_va);
         }
+        if (ptr != MAP_FAILED) {
+            g_bounce_table[fd].cpu_base = (uint64_t)(uintptr_t)ptr;
+            g_bounce_table[fd].gpu_base = alloc.out.gpu_va;
+            g_bounce_table[fd].rolling_idx = 0;
+            kmsg_always("[VALHALL_BOUNCE] Bounce buffer SAME_VA asignado para fd=%d: cpu_base=0x%llx, gpu_base=0x%llx (1MB / 4096 slots)\n",
+                        fd, (unsigned long long)g_bounce_table[fd].cpu_base,
+                        (unsigned long long)g_bounce_table[fd].gpu_base);
+            return 0;
+        } else {
+            kmsg_always("[VALHALL_BOUNCE] ERROR: mmap fallo para fd=%d (errno=%d)\n", fd, errno);
+            return -1;
+        }
+    } else {
+        kmsg_always("[VALHALL_BOUNCE] ERROR: ioctl MEM_ALLOC (0xc0208005) fallo para fd=%d ret=%ld (errno=%d)\n", fd, ret, errno);
+        return -1;
     }
-    uint32_t slot = (g_bounce_table[fd].rolling_idx++) % 4096;
-    return g_bounce_table[fd].base + (slot * 256);
+}
+
+static inline int alloc_bounce_slot(int fd, void **out_cpu_ptr, uint64_t *out_gpu_va) {
+    return 0;
+}
+
+static inline void *gpu_to_cpu_jc(int fd, uint64_t gpu_addr) {
+    if (fd >= 0 && fd < MAX_BOUNCE_FDS && g_bounce_table[fd].gpu_base != 0 &&
+        gpu_addr >= g_bounce_table[fd].gpu_base &&
+        gpu_addr < g_bounce_table[fd].gpu_base + (256 * 4096)) {
+        uint64_t offset = gpu_addr - g_bounce_table[fd].gpu_base;
+        return (void *)(uintptr_t)(g_bounce_table[fd].cpu_base + offset);
+    }
+    return (void *)(uintptr_t)gpu_addr;
 }
 
 #ifdef __GLIBC__
@@ -576,14 +599,14 @@ int ioctl(int fd, int request, ...) {
             for (uint32_t i = 0; i < sub->nr_atoms; i++) {
                 const uint64_t *q = (const uint64_t *)&src[i * 64];
                 uint32_t core_req = (uint32_t)(q[6] >> 32);
-                if (!(core_req & 0x200) && q[1] > 0x10000) {
+                if (!(core_req & 0x200) && is_valid_jc_ptr(q[1])) {
                     uint64_t cur = q[1];
                     uint64_t prev = 0;
                     int step = 0;
-                    while (cur > 0x10000 && step < 16) {
+                    while (is_valid_jc_ptr(cur) && step < 16) {
                         uint64_t *jc_ptr = (uint64_t *)(uintptr_t)cur;
                         uint32_t job_type = (uint32_t)((jc_ptr[2] >> 1) & 0x7f);
-                        if (job_type == 1 && prev != 0 && jc_ptr[3] > 0x10000) {
+                        if (job_type == 1 && prev != 0 && is_valid_jc_ptr(jc_ptr[3])) {
                             split_atom_idx = (int)i;
                             compute_last_job = prev;
                             vertex_first_job = jc_ptr[3];
@@ -602,7 +625,7 @@ int ioctl(int fd, int request, ...) {
                 uint64_t vcur = vertex_first_job;
                 uint64_t vprev = 0;
                 int vstep = 0;
-                while (vcur > 0x10000 && vstep < 16) {
+                while (is_valid_jc_ptr(vcur) && vstep < 16) {
                     uint64_t *vptr = (uint64_t *)(uintptr_t)vcur;
                     uint32_t jtype = (uint32_t)((vptr[2] >> 1) & 0x7f);
                     if (jtype == 7 && vprev != 0) {
@@ -622,10 +645,20 @@ int ioctl(int fd, int request, ...) {
             uint8_t atoms72[256 * 72];
             memset(atoms72, 0, sizeof(atoms72));
             uint32_t out_nr_atoms = 0;
-            const uint8_t new_vertex_atom_num = 5;
-            const uint8_t new_tiler_atom_num = 6;
+            uint8_t max_atom_num = 0;
+            for (uint32_t i = 0; i < sub->nr_atoms; i++) {
+                if (src[i * 64 + 48] > max_atom_num) max_atom_num = src[i * 64 + 48];
+            }
+            uint8_t new_vertex_atom_num = (max_atom_num < 250) ? (max_atom_num + 1) : 251;
+            uint8_t new_tiler_atom_num = (max_atom_num < 250) ? (max_atom_num + 2) : 252;
 
-            if (0 && split_atom_idx >= 0 && compute_last_job != 0 && vertex_first_job != 0 && tiler_first_job != 0) {
+            kmsg_always("[gpu-driver] ATOM_CHECK: nr_atoms=%u, split_idx=%d, clast=0x%llx, vfirst=0x%llx, tfirst=0x%llx\n",
+                        sub->nr_atoms, split_atom_idx,
+                        (unsigned long long)compute_last_job,
+                        (unsigned long long)vertex_first_job,
+                        (unsigned long long)tiler_first_job);
+
+            if (split_atom_idx >= 0 && compute_last_job != 0 && vertex_first_job != 0 && tiler_first_job != 0) {
                 // 1. Terminar la cadena Compute en compute_last_job (JC->next = 0)
                 uint64_t *clast_ptr = (uint64_t *)(uintptr_t)compute_last_job;
                 clast_ptr[3] = 0;
@@ -710,12 +743,12 @@ int ioctl(int fd, int request, ...) {
                 out_nr_atoms = sub->nr_atoms;
             }
 
-            // Corrección de cadenas Fragment Shader: omitir dummy SFBD (tag=1, tiles=0)
+            // Preservar átomos y flags originales de libmali para Valhall v9
             for (uint32_t i = 0; i < out_nr_atoms; i++) {
                 uint32_t *creq_ptr = (uint32_t *)&atoms72[i * 72 + 52];
-                if (!(*creq_ptr & 0x200)) {
-                    // Asegurar flags de coherencia y flush para silicio multi-core MC2
-                    *creq_ptr |= 0x48; // BASE_JD_REQ_COHERENT_GROUP | BASE_JD_REQ_CF
+                if (0 && !(*creq_ptr & 0x200)) {
+                    // Flags de coherencia preservados sin alteraciones forzadas
+                    *creq_ptr |= 0x48;
                 }
                 if (*creq_ptr & 0x01) { // BASE_JD_REQ_FS
                     uint64_t fjc = *(const uint64_t *)&atoms72[i * 72 + 8];
@@ -734,13 +767,9 @@ int ioctl(int fd, int request, ...) {
                                         fw, fw + 3, fbd0[fw], fbd0[fw+1], fbd0[fw+2], fbd0[fw+3]);
                             }
                         }
-                        /* Fusión de Fragment Job en Valhall v9:
-                         * libmali genera JC[2.0] como dummy pre-frame (w4=0, tag=1) alineado a 128B
-                         * y JC[2.1] como frame real (w4=tiles, tag=3) pero en offset +0x40 (desalineado a 128B).
-                         * En Valhall v9, el Job Manager exige alineación estricta a 128B en cada descriptor.
-                         * Por ello, fusionamos los campos de JC[2.1] directamente sobre JC[2.0] (que ya está alineado).
-                         */
-                        if (type == 9 && fj0[4] == 0 && fj0[3] > 0x10000) {
+                        // Fusión de fragment job real sobre pre-frame dummy con bounds nulos
+                        flush_dcache_range((uintptr_t)fj0, 128);
+                        if (type == 9 && fj0[4] == 0 && is_valid_jc_ptr(fj0[3])) {
                             uint64_t real_fj = fj0[3];
                             const uint64_t *fj1 = (const uint64_t *)(uintptr_t)real_fj;
                             GPU_LOG("  [DUMP_FJ1] @ 0x%llx: w0=0x%llx w1=0x%llx w2=0x%llx w3=0x%llx w4=0x%llx w5=0x%llx w6=0x%llx w7=0x%llx w8=0x%llx w9=0x%llx w10=0x%llx w11=0x%llx",
@@ -782,46 +811,50 @@ int ioctl(int fd, int request, ...) {
                 uint32_t core_req = *(const uint32_t *)&atoms72[i * 72 + 52];
                 uint64_t sjc = *(const uint64_t *)&atoms72[i * 72 + 8];
                 if (!(core_req & 0x200) && is_valid_jc_ptr(sjc)) {
-                    // Si la cabeza del átomo está desalineada a 128B, re-alinear usando bounce slot (stride 256B)
-                    if ((sjc & 0x7f) != 0) {
-                        uint64_t bounce_slot = get_bounce_slot(fd);
-                        if (bounce_slot != 0) {
-                            memcpy((void *)(uintptr_t)bounce_slot, (const void *)(uintptr_t)sjc, 256);
-                            flush_dcache_range(bounce_slot, 256);
-                            *(uint64_t *)&atoms72[i * 72 + 8] = bounce_slot;
-                            GPU_LOG("  [VALHALL_BOUNCE] Head JC de Atom[%u] desalineado (0x%llx) -> bounce slot 0x%llx",
-                                    i, (unsigned long long)sjc, (unsigned long long)bounce_slot);
-                            sjc = bounce_slot;
+                    // Bouncing deshabilitado: preservamos descriptores legítimos de libmali
+                    if (0 && (sjc & 0x7f) != 0) {
+                        void *bounce_cpu = NULL;
+                        uint64_t bounce_gpu = 0;
+                        if (alloc_bounce_slot(fd, &bounce_cpu, &bounce_gpu)) {
+                            memcpy(bounce_cpu, (const void *)(uintptr_t)sjc, 256);
+                            flush_dcache_range((uintptr_t)bounce_cpu, 256);
+                            *(uint64_t *)&atoms72[i * 72 + 8] = bounce_gpu;
+                            GPU_LOG("  [VALHALL_BOUNCE] Head JC de Atom[%u] desalineado (0x%llx) -> bounce gpu=0x%llx (cpu=0x%llx)",
+                                    i, (unsigned long long)sjc, (unsigned long long)bounce_gpu, (unsigned long long)(uintptr_t)bounce_cpu);
+                            sjc = bounce_gpu;
                         }
                     }
 
                     uint64_t cur = sjc;
                     int step = 0;
                     while (is_valid_jc_ptr(cur) && step < 16) {
-                        uint64_t *p_rw = (uint64_t *)(uintptr_t)cur;
-                        const uint64_t *p = (const uint64_t *)(uintptr_t)cur;
+                        uint64_t *p_rw = (uint64_t *)gpu_to_cpu_jc(fd, cur);
+                        const uint64_t *p = (const uint64_t *)gpu_to_cpu_jc(fd, cur);
                         uint32_t type = (uint32_t)((p[2] >> 1) & 0x7f);
                         uint32_t jidx = (uint32_t)(p[2] >> 16) & 0xffff;
                         uint32_t dep1 = (uint32_t)(p[2] >> 32) & 0xffff;
                         uint32_t dep2 = (uint32_t)(p[2] >> 48) & 0xffff;
                         uint32_t bar = (uint32_t)(p[2] & 0x1);
 
-                        // Si next apunta a un descriptor desalineado a 128B, re-alinear usando bounce slot (stride 256B)
-                        if (p[3] != 0 && (p[3] & 0x7f) != 0) {
+                        // Bouncing deshabilitado: preservamos descriptores legítimos de libmali
+                        if (0 && p[3] != 0 && (p[3] & 0x7f) != 0) {
                             uint64_t unaligned_next = p[3];
-                            uint64_t bounce_slot = get_bounce_slot(fd);
-                            if (bounce_slot != 0) {
-                                memcpy((void *)(uintptr_t)bounce_slot, (const void *)(uintptr_t)unaligned_next, 256);
-                                p_rw[3] = bounce_slot;
-                                flush_dcache_range(bounce_slot, 256);
+                            void *bounce_cpu = NULL;
+                            uint64_t bounce_gpu = 0;
+                            if (alloc_bounce_slot(fd, &bounce_cpu, &bounce_gpu)) {
+                                void *src_cpu = gpu_to_cpu_jc(fd, unaligned_next);
+                                memcpy(bounce_cpu, src_cpu, 256);
+                                p_rw[3] = bounce_gpu;
+                                flush_dcache_range((uintptr_t)bounce_cpu, 256);
                                 flush_dcache_range((uintptr_t)p_rw, 64);
-                                GPU_LOG("  [VALHALL_BOUNCE] Job @ 0x%llx next desalineado (0x%llx) -> bounce slot 0x%llx",
-                                         (unsigned long long)cur, (unsigned long long)unaligned_next, (unsigned long long)bounce_slot);
+                                GPU_LOG("  [VALHALL_BOUNCE] Job @ 0x%llx next desalineado (0x%llx) -> bounce gpu=0x%llx (cpu=0x%llx)",
+                                         (unsigned long long)cur, (unsigned long long)unaligned_next,
+                                         (unsigned long long)bounce_gpu, (unsigned long long)(uintptr_t)bounce_cpu);
                             }
                         }
 
                         // Limpiar bits 9..15 en w2 preservando bit 8 (job_barrier)
-                        if (p[2] & 0x000000000000fe00ULL) {
+                        if (0 && (p[2] & 0x000000000000fe00ULL)) {
                             GPU_LOG("  [VALHALL_FIX_FLAGS] Limpiando bits [15:9] en JC @ 0x%llx: 0x%llx -> 0x%llx",
                                     (unsigned long long)cur, (unsigned long long)p[2],
                                     (unsigned long long)(p[2] & ~0x000000000000fe00ULL));
@@ -832,7 +865,7 @@ int ioctl(int fd, int request, ...) {
                         /* Preservar FBD tag legítimo de libmali */
 
                         // Flush universal de descriptor de trabajo para silicio Valhall
-                        flush_dcache_range((uintptr_t)cur, 256);
+                        flush_dcache_range((uintptr_t)p_rw, 256);
 
                         /* Descriptores originales de silicio Valhall preservados íntegros */
                         GPU_LOG("  [BEFORE_SUBMIT] ATOM[%u] JC[%u.%d] @ 0x%llx: type=%u, idx=0x%x, dep1=0x%x, dep2=0x%x, bar=%u, next=0x%llx",
@@ -843,17 +876,18 @@ int ioctl(int fd, int request, ...) {
                                     (unsigned long long)p[w], (unsigned long long)p[w + 1],
                                     (unsigned long long)p[w + 2], (unsigned long long)p[w + 3]);
                         }
-                        if (type == 5) {
+                        if (0 && type == 5) {
                             /* Valhall v9 ejecuta vertex shaders en shader cores como COMPUTE (type 4) */
                             p_rw[2] = (p_rw[2] & ~0xfeULL) | (4ULL << 1);
-                            flush_dcache_range((uintptr_t)cur, 256);
+                            flush_dcache_range((uintptr_t)p_rw, 256);
                             GPU_LOG("  [VALHALL_VERTEX_ADAPT] Convertido Vertex Job en JC[%u.%d] @ 0x%llx a COMPUTE (type 4)",
                                     i, step, (unsigned long long)cur);
                         }
                         if (type == 9 && is_valid_jc_ptr(p[5])) {
                             uint64_t fb_ptr = p[5] & ~0x3ULL;
-                            flush_dcache_range((uintptr_t)fb_ptr, 256);
-                            const uint64_t *fb = (const uint64_t *)(uintptr_t)fb_ptr;
+                            void *fb_cpu = gpu_to_cpu_jc(fd, fb_ptr);
+                            flush_dcache_range((uintptr_t)fb_cpu, 256);
+                            const uint64_t *fb = (const uint64_t *)fb_cpu;
                             GPU_LOG("    [FB_DUMP] w5=0x%llx (tag=%u, base=0x%llx):",
                                     (unsigned long long)p[5], (unsigned int)(p[5] & 0x3), (unsigned long long)fb_ptr);
                             for (int fw = 0; fw < 32; fw += 4) {
@@ -890,29 +924,9 @@ int ioctl(int fd, int request, ...) {
                 .stride = 0x48
             };
             long ret = syscall(SYS_ioctl, fd, 0x40108002, &sub72);
+            kmsg_always("[gpu-driver] JOB_SUBMIT ret=%ld, errno=%d (out_nr_atoms=%u)\n", ret, ret < 0 ? errno : 0, out_nr_atoms);
             GPU_LOG("ioctl JOB_SUBMIT (0x40108002): nr_atoms=%u (orig=%u), stride 0x40->0x48, ret=%ld (errno=%d)",
                     out_nr_atoms, sub->nr_atoms, ret, ret < 0 ? errno : 0);
-
-            // Log de estado AFTER submit para todas las cadenas ejecutadas (solo hardware jobs)
-            for (uint32_t i = 0; i < out_nr_atoms; i++) {
-                const uint64_t *a72 = (const uint64_t *)&atoms72[i * 72];
-                uint32_t core_req = *(const uint32_t *)&atoms72[i * 72 + 52];
-                uint64_t jc_start = a72[1];
-                if (!(core_req & 0x200) && is_valid_jc_ptr(jc_start)) {
-                    uint64_t cur = jc_start;
-                    int step = 0;
-                    while (is_valid_jc_ptr(cur) && step < 16) {
-                        const uint64_t *jc_ptr = (const uint64_t *)(uintptr_t)cur;
-                        GPU_LOG("    ATOM[%u] JC[%u.%d] AFTER @ 0x%llx: status=0x%016llx fault_ptr=0x%016llx w2=0x%016llx next=0x%016llx w4=0x%016llx w5=0x%016llx",
-                                i, i, step, (unsigned long long)cur,
-                                (unsigned long long)jc_ptr[0], (unsigned long long)jc_ptr[1],
-                                (unsigned long long)jc_ptr[2], (unsigned long long)jc_ptr[3],
-                                (unsigned long long)jc_ptr[4], (unsigned long long)jc_ptr[5]);
-                        cur = jc_ptr[3];
-                        step++;
-                    }
-                }
-            }
             return ret;
         }
         long ret = syscall(SYS_ioctl, fd, 0x40108002, arg);
@@ -1270,91 +1284,9 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
                                              uint32_t width, uint32_t height,
                                              uint32_t format, uint32_t flags)
 {
-    /* Solo crear Dumb BO KMS si el buffer es solicitado explícitamente para scanout */
-    if (!(flags & GBM_BO_USE_SCANOUT)) {
-        return NULL;
-    }
-
-    int card_fd = -1;
-    if (g_kms_fd >= 0) {
-        card_fd = g_kms_fd;
-    } else {
-        card_fd = get_device_fd(gbm);
-    }
-    if (card_fd < 0) {
-        card_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
-        if (card_fd >= 0) g_drm_fd = card_fd;
-        kmsg_log("[GPU-GBM] Fallback open card0: fd=%d\n", card_fd);
-    }
-    kmsg_log("[GPU-GBM] create_scanout_dumb_bo: gbm=%p, card_fd=%d (kms_fd=%d), %ux%u format=0x%x flags=0x%x\n",
-             (void*)gbm, card_fd, g_kms_fd, width, height, format, flags);
-    if (card_fd < 0) {
-        kmsg_log("[GPU-GBM] ERROR: No se detectó descriptor de card0 para crear dumb buffer\n");
-        return NULL;
-    }
-
-    struct drm_mode_create_dumb creq = {0};
-    creq.width = width;
-    creq.height = height;
-    if (format == 0x36314752) { /* DRM_FORMAT_RGB565 */
-        creq.bpp = 16;
-    } else {
-        creq.bpp = 32; /* DRM_FORMAT_XRGB8888, ARGB8888, etc. */
-    }
-
-    int ret = drmIoctl(card_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
-    if (ret != 0 || creq.handle == 0) {
-        kmsg_log("[GPU-GBM] ERROR: DRM_IOCTL_MODE_CREATE_DUMB falló (ret=%d, errno=%d)\n", ret, errno);
-        return NULL;
-    }
-
-    int prime_fd = -1;
-    ret = drmPrimeHandleToFD(card_fd, creq.handle, DRM_CLOEXEC | DRM_RDWR, &prime_fd);
-    if (ret != 0 || prime_fd < 0) {
-        kmsg_log("[GPU-GBM] ERROR: drmPrimeHandleToFD falló (ret=%d, errno=%d)\n", ret, errno);
-        struct drm_mode_destroy_dumb dreq = {0};
-        dreq.handle = creq.handle;
-        drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-        return NULL;
-    }
-
-    int saved_prime_fd = fcntl(prime_fd, F_DUPFD_CLOEXEC, 0);
-
-    struct gbm_import_fd_modifier_data_local mod_data = {
-        .width = width,
-        .height = height,
-        .format = format,
-        .num_fds = 1,
-        .fds = { prime_fd, -1, -1, -1 },
-        .strides = { (int)creq.pitch, 0, 0, 0 },
-        .offsets = { 0, 0, 0, 0 },
-        .modifier = DRM_FORMAT_MOD_LINEAR
-    };
-
-    kmsg_log("[GPU-GBM] Importando dumb buffer a Mali via 0x5504: prime_fd=%d, %ux%u stride=%u\n",
-             prime_fd, width, height, creq.pitch);
-    struct gbm_bo *bo = NULL;
-    if (real_gbm_bo_import) {
-        bo = real_gbm_bo_import(gbm, GBM_BO_IMPORT_FD_MODIFIER, &mod_data, flags | GBM_BO_USE_RENDERING);
-    }
-    close(prime_fd);
-
-    if (!bo) {
-        kmsg_log("[GPU-GBM] ERROR: real_gbm_bo_import falló (errno=%d)\n", errno);
-        if (saved_prime_fd >= 0) close(saved_prime_fd);
-        struct drm_mode_destroy_dumb dreq = {0};
-        dreq.handle = creq.handle;
-        drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-        return NULL;
-    }
-
-    register_dumb_bo(bo, creq.handle, card_fd, saved_prime_fd, width, height, creq.pitch, format, creq.size);
-    kmsg_log("[GPU-GBM] Dumb BO registrado OK: bo=%p, handle=%u, prime_fd=%d, pitch=%u, size=%llu\n",
-             (void*)bo, creq.handle, saved_prime_fd, creq.pitch, (unsigned long long)creq.size);
-    GPU_LOG("Dumb BO creado exitosamente: bo=%p, handle=%u, pitch=%u, size=%llu",
-            (void*)bo, creq.handle, creq.pitch, (unsigned long long)creq.size);
-
-    return bo;
+    (void)gbm; (void)width; (void)height; (void)format; (void)flags;
+    /* Desactivado: libmali asigna buffers GPU nativos coherentes sin forzar dumb KMS */
+    return NULL;
 }
 
 struct gbm_device *gbm_create_device(int fd) {
@@ -1576,13 +1508,32 @@ union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo) {
         union gbm_bo_handle h = {0};
         h.u32 = entry->dumb_handle;
         pthread_mutex_unlock(&g_dumb_mutex);
-        kmsg_log("[GPU-GBM] gbm_bo_get_handle(bo=%p) -> DUMB handle=%u\n", (void*)bo, h.u32);
         return h;
     }
     pthread_mutex_unlock(&g_dumb_mutex);
+
     if (real_gbm_bo_get_handle) {
         union gbm_bo_handle h = real_gbm_bo_get_handle(bo);
-        kmsg_log("[GPU-GBM] gbm_bo_get_handle(bo=%p) -> REAL handle=%u\n", (void*)bo, h.u32);
+        int card_fd = (g_kms_fd >= 0) ? g_kms_fd : g_drm_fd;
+        if (card_fd >= 0 && h.u32 > 0) {
+            int test_fd = -1;
+            if (drmPrimeHandleToFD(card_fd, h.u32, 0, &test_fd) == 0) {
+                close(test_fd);
+                return h;
+            }
+            if (real_gbm_bo_get_fd) {
+                int pfd = real_gbm_bo_get_fd(bo);
+                if (pfd >= 0) {
+                    uint32_t kms_h = 0;
+                    if (drmPrimeFDToHandle(card_fd, pfd, &kms_h) == 0) {
+                        close(pfd);
+                        h.u32 = kms_h;
+                        return h;
+                    }
+                    close(pfd);
+                }
+            }
+        }
         return h;
     }
     union gbm_bo_handle h = {0};
@@ -1912,6 +1863,14 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
     }
 
     if (target == EGL_LINUX_DMA_BUF_EXT && attrib_list) {
+        /* Intento 1: Llamada directa a libmali con atributos originales de wlroots */
+        if (real_eglCreateImageKHR) {
+            EGLImageKHR direct_img = real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list);
+            if (direct_img) {
+                return direct_img;
+            }
+        }
+
         int patched_attribs[64];
         int count = 0;
         int has_mod = 0;
@@ -2227,7 +2186,9 @@ drmModeConnectorPtr drmModeGetConnectorCurrent(int fd, uint32_t connectorId) {
 }
 
 static int safe_drm_set_master(int fd) {
-    if (fd < 0) return -1;
+    if (fd < 0) return 0;
+    static int s_master_done = 0;
+    if (s_master_done) return 0;
     static int (*real_drmSetMaster)(int) = NULL;
     if (!real_drmSetMaster) {
         real_drmSetMaster = dlsym(RTLD_DEFAULT, "drmSetMaster");
@@ -2243,6 +2204,7 @@ static int safe_drm_set_master(int fd) {
     if (ret != 0) {
         ret = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
     }
+    if (ret == 0) s_master_done = 1;
     return ret;
 }
 
@@ -2465,8 +2427,7 @@ __attribute__((visibility("default")))
 int drmModeSetCursor(int fd, uint32_t crtcId, uint32_t bo_handle,
                      uint32_t width, uint32_t height)
 {
-    kmsg_log("[GPU-KMS] drmModeSetCursor(crtc=%u, handle=%u, %ux%u) -> forzar software cursor (-EINVAL)\n",
-             crtcId, bo_handle, width, height);
+    if (bo_handle == 0) return 0; /* Desactivar hardware cursor retorna exito limpiamente */
     errno = EINVAL;
     return -1;
 }
@@ -2475,8 +2436,7 @@ __attribute__((visibility("default")))
 int drmModeSetCursor2(int fd, uint32_t crtcId, uint32_t bo_handle,
                       uint32_t width, uint32_t height, int32_t hot_x, int32_t hot_y)
 {
-    kmsg_log("[GPU-KMS] drmModeSetCursor2(crtc=%u, handle=%u, %ux%u) -> forzar software cursor (-EINVAL)\n",
-             crtcId, bo_handle, width, height);
+    if (bo_handle == 0) return 0; /* Desactivar hardware cursor retorna exito limpiamente */
     errno = EINVAL;
     return -1;
 }

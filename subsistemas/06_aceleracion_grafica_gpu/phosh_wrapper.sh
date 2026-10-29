@@ -1,4 +1,7 @@
 #!/bin/sh
+# ==============================================================================
+# phosh_wrapper.sh - Lanzador de GNOME Mobile Shell (Phosh) en modo seguro
+# ==============================================================================
 unset LD_PRELOAD
 export HOME=/root
 export USER=root
@@ -9,14 +12,37 @@ export QT_QPA_PLATFORM=wayland
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
+export NO_AT_BRIDGE=1
 
+# Renderizado por software puro (Cairo/Pixman)
+export GDK_RENDERING=similar
+export GDK_GL=never
+export GSK_RENDERER=cairo
+
+# 1. Esperar disponibilidad del socket Wayland de Phoc
 count=0
-while [ ! -S /tmp/runtime-root/wayland-0 ] && [ $count -lt 50 ]; do
+while [ ! -S /tmp/runtime-root/wayland-0 ] && [ $count -lt 80 ]; do
     sleep 0.1
     count=$((count + 1))
 done
 
-sleep 1.5
+# 2. Esperar a que el compositor Phoc complete la inicializacion de KMS y registre DSI-1
+count=0
+while [ $count -lt 80 ]; do
+    if /usr/bin/wlr-randr 2>/dev/null | grep -q "DSI-1"; then
+        echo "[wrapper] Salida DSI-1 detectada y activa!" >> /var/log/phosh_user.log
+        break
+    fi
+    sleep 0.1
+    count=$((count + 1))
+done
+sleep 0.5
 
-echo "[wrapper] Lanzando sesion GNOME Mobile Phosh..." >> /var/log/phosh_user.log
+# 3. Configuraciones de energia seguras para GNOME (NUNCA TOCAR SYSFS)
+gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
+gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+
+echo "[wrapper] Lanzando sesion GNOME Mobile Phosh en modo software..." >> /var/log/phosh_user.log
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
