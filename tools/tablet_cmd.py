@@ -31,8 +31,10 @@ def run_remote_serial(cmd, tty_path='/dev/ttyACM0', timeout=4.0):
     except Exception as e:
         return f"ERROR SERIAL: {e}\n"
 
-def run_remote(cmd, ip='172.16.42.1', port=2323, timeout=6.0):
+def run_remote(cmd, ip='172.16.42.1', port=2323, timeout=None):
     import time
+    if timeout is None:
+        timeout = float(os.environ.get("TABLET_TIMEOUT", 10.0))
     token = b'__CMD_FINISHED_MARKER__'
     for p in [port, 23]:
         try:

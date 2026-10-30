@@ -56,6 +56,24 @@ int drmIoctl(int fd, unsigned long request, void *arg) {
         return -1;
     }
 
+    if (request == DRM_IOCTL_DROP_MASTER) {
+        return 0; /* Prevenir pérdida de DRM Master en card0 durante sesión activa */
+    }
+
+    if (request == DRM_IOCTL_MODE_PAGE_FLIP) {
+        ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+        for (int tries = 0; tries < 25; tries++) {
+            int r = ioctl(fd, request, arg);
+            if (r == 0 || errno != EBUSY) return r;
+            usleep(1000);
+        }
+        return ioctl(fd, request, arg);
+    }
+
+    if (request == DRM_IOCTL_MODE_SETCRTC) {
+        ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+    }
+
     return ioctl(fd, request, arg);
 }
 
@@ -506,6 +524,9 @@ int ioctl(int fd, int request, ...) {
     va_end(ap);
 
     unsigned int req = (unsigned int)request;
+    if (req == DRM_IOCTL_DROP_MASTER) {
+        return 0; /* Nunca soltar DRM Master de card0 */
+    }
     if (is_debug_enabled() && (((req >> 8) & 0xFF) == 0x80)) {
         GPU_LOG("KBASE ioctl fd=%d req=0x%x", fd, req);
     }
@@ -606,7 +627,7 @@ int ioctl(int fd, int request, ...) {
                     while (is_valid_jc_ptr(cur) && step < 16) {
                         uint64_t *jc_ptr = (uint64_t *)(uintptr_t)cur;
                         uint32_t job_type = (uint32_t)((jc_ptr[2] >> 1) & 0x7f);
-                        if (job_type == 1 && prev != 0 && is_valid_jc_ptr(jc_ptr[3])) {
+                        if (0 && job_type == 1 && prev != 0 && is_valid_jc_ptr(jc_ptr[3])) {
                             split_atom_idx = (int)i;
                             compute_last_job = prev;
                             vertex_first_job = jc_ptr[3];
@@ -924,7 +945,6 @@ int ioctl(int fd, int request, ...) {
                 .stride = 0x48
             };
             long ret = syscall(SYS_ioctl, fd, 0x40108002, &sub72);
-            kmsg_always("[gpu-driver] JOB_SUBMIT ret=%ld, errno=%d (out_nr_atoms=%u)\n", ret, ret < 0 ? errno : 0, out_nr_atoms);
             GPU_LOG("ioctl JOB_SUBMIT (0x40108002): nr_atoms=%u (orig=%u), stride 0x40->0x48, ret=%ld (errno=%d)",
                     out_nr_atoms, sub->nr_atoms, ret, ret < 0 ? errno : 0);
             return ret;
@@ -1079,6 +1099,7 @@ struct dumb_bo_entry {
     uint32_t stride;
     uint32_t format;
     uint64_t size;
+    void *cpu_map;
 };
 
 static struct dumb_bo_entry g_dumb_table[MAX_DUMB_ENTRIES] = {0};
@@ -1136,7 +1157,7 @@ static void (*real_gbm_surface_release_buffer)(struct gbm_surface *, struct gbm_
 
 static void register_dumb_bo(struct gbm_bo *bo, uint32_t dumb_handle, int card_fd, int prime_fd,
                              uint32_t width, uint32_t height, uint32_t stride,
-                             uint32_t format, uint64_t size) {
+                             uint32_t format, uint64_t size, void *cpu_map) {
     pthread_mutex_lock(&g_dumb_mutex);
     for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
         if (g_dumb_table[i].bo == NULL) {
@@ -1149,9 +1170,10 @@ static void register_dumb_bo(struct gbm_bo *bo, uint32_t dumb_handle, int card_f
             g_dumb_table[i].stride = stride;
             g_dumb_table[i].format = format;
             g_dumb_table[i].size = size;
+            g_dumb_table[i].cpu_map = cpu_map;
             pthread_mutex_unlock(&g_dumb_mutex);
-            GPU_LOG("Registrado dumb bo %p (slot %d, handle %u, prime_fd %d, %ux%u, stride %u)",
-                    (void*)bo, i, dumb_handle, prime_fd, width, height, stride);
+            GPU_LOG("Registrado dumb bo %p (slot %d, handle %u, prime_fd %d, %ux%u, stride %u, map=%p)",
+                    (void*)bo, i, dumb_handle, prime_fd, width, height, stride, cpu_map);
             return;
         }
     }
@@ -1284,9 +1306,106 @@ static struct gbm_bo *create_scanout_dumb_bo(struct gbm_device *gbm,
                                              uint32_t width, uint32_t height,
                                              uint32_t format, uint32_t flags)
 {
-    (void)gbm; (void)width; (void)height; (void)format; (void)flags;
-    /* Desactivado: libmali asigna buffers GPU nativos coherentes sin forzar dumb KMS */
-    return NULL;
+    /* Solo crear Dumb BO KMS si el buffer es solicitado explícitamente para scanout */
+    if (!(flags & GBM_BO_USE_SCANOUT)) {
+        return NULL;
+    }
+
+    int card_fd = -1;
+    if (g_kms_fd >= 0) {
+        card_fd = g_kms_fd;
+    } else {
+        card_fd = get_device_fd(gbm);
+    }
+    if (card_fd < 0) {
+        card_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+        if (card_fd >= 0) g_drm_fd = card_fd;
+        kmsg_log("[GPU-GBM] Fallback open card0: fd=%d\n", card_fd);
+    }
+    kmsg_log("[GPU-GBM] create_scanout_dumb_bo: gbm=%p, card_fd=%d (kms_fd=%d), %ux%u format=0x%x flags=0x%x\n",
+             (void*)gbm, card_fd, g_kms_fd, width, height, format, flags);
+    if (card_fd < 0) {
+        kmsg_log("[GPU-GBM] ERROR: No se detectó descriptor de card0 para crear dumb buffer\n", 0);
+        return NULL;
+    }
+
+    struct drm_mode_create_dumb creq = {0};
+    creq.width = width;
+    creq.height = height;
+    if (format == 0x36314752) { /* DRM_FORMAT_RGB565 */
+        creq.bpp = 16;
+    } else {
+        creq.bpp = 32; /* DRM_FORMAT_XRGB8888, ARGB8888, etc. */
+    }
+
+    int ret = drmIoctl(card_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
+    if (ret != 0 || creq.handle == 0) {
+        kmsg_log("[GPU-GBM] ERROR: DRM_IOCTL_MODE_CREATE_DUMB falló (ret=%d, errno=%d)\n", ret, errno);
+        return NULL;
+    }
+
+    int prime_fd = -1;
+    ret = drmPrimeHandleToFD(card_fd, creq.handle, DRM_CLOEXEC | DRM_RDWR, &prime_fd);
+    if (ret != 0 || prime_fd < 0) {
+        kmsg_log("[GPU-GBM] ERROR: drmPrimeHandleToFD falló (ret=%d, errno=%d)\n", ret, errno);
+        struct drm_mode_destroy_dumb dreq = {0};
+        dreq.handle = creq.handle;
+        drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+        return NULL;
+    }
+
+    int saved_prime_fd = fcntl(prime_fd, F_DUPFD_CLOEXEC, 0);
+
+    struct gbm_import_fd_modifier_data_local mod_data = {
+        .width = width,
+        .height = height,
+        .format = format,
+        .num_fds = 1,
+        .fds = { prime_fd, -1, -1, -1 },
+        .strides = { (int)creq.pitch, 0, 0, 0 },
+        .offsets = { 0, 0, 0, 0 },
+        .modifier = DRM_FORMAT_MOD_LINEAR
+    };
+
+    kmsg_log("[GPU-GBM] Importando dumb buffer a Mali via 0x5504: prime_fd=%d, %ux%u stride=%u\n",
+             prime_fd, width, height, creq.pitch);
+    struct gbm_bo *bo = NULL;
+    if (real_gbm_bo_import) {
+        bo = real_gbm_bo_import(gbm, GBM_BO_IMPORT_FD_MODIFIER, &mod_data, flags | GBM_BO_USE_RENDERING);
+    }
+    close(prime_fd);
+
+    if (!bo) {
+        kmsg_log("[GPU-GBM] ERROR: real_gbm_bo_import falló (errno=%d)\n", errno);
+        if (saved_prime_fd >= 0) close(saved_prime_fd);
+        struct drm_mode_destroy_dumb dreq = {0};
+        dreq.handle = creq.handle;
+        drmIoctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+        return NULL;
+    }
+
+    void *cpu_map = NULL;
+    struct drm_mode_map_dumb mreq = { .handle = creq.handle };
+    if (drmIoctl(card_fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq) == 0) {
+        void *m = mmap(NULL, creq.size, PROT_READ | PROT_WRITE, MAP_SHARED, card_fd, mreq.offset);
+        if (m != MAP_FAILED) {
+            cpu_map = m;
+        }
+    }
+    if (!cpu_map && saved_prime_fd >= 0) {
+        void *m = mmap(NULL, creq.size, PROT_READ | PROT_WRITE, MAP_SHARED, saved_prime_fd, 0);
+        if (m != MAP_FAILED) {
+            cpu_map = m;
+        }
+    }
+
+    register_dumb_bo(bo, creq.handle, card_fd, saved_prime_fd, width, height, creq.pitch, format, creq.size, cpu_map);
+    kmsg_log("[GPU-GBM] Dumb BO registrado OK: bo=%p, handle=%u, prime_fd=%d, pitch=%u, size=%llu, map=%p\n",
+             (void*)bo, creq.handle, saved_prime_fd, creq.pitch, (unsigned long long)creq.size, cpu_map);
+    GPU_LOG("Dumb BO creado exitosamente: bo=%p, handle=%u, pitch=%u, size=%llu, map=%p",
+            (void*)bo, creq.handle, creq.pitch, (unsigned long long)creq.size, cpu_map);
+
+    return bo;
 }
 
 struct gbm_device *gbm_create_device(int fd) {
@@ -1697,87 +1816,814 @@ static EGLBoolean (*real_eglBindWaylandDisplayWL)(EGLDisplay, struct wl_display 
 static EGLBoolean (*real_eglUnbindWaylandDisplayWL)(EGLDisplay, struct wl_display *) = NULL;
 static void *(*real_eglGetProcAddress)(const char *) = NULL;
 
+static const char *(*real_eglQueryString)(EGLDisplay, int) = NULL;
+__attribute__((visibility("default")))
+const char *eglQueryString(EGLDisplay dpy, int name) {
+    if (!real_eglQueryString) {
+        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mali) real_eglQueryString = dlsym(mali, "eglQueryString");
+        if (!real_eglQueryString) real_eglQueryString = dlsym(RTLD_NEXT, "eglQueryString");
+    }
+    const char *orig = real_eglQueryString ? real_eglQueryString(dpy, name) : NULL;
+    /* 0x3055 = EGL_EXTENSIONS: remover EGL_WL_bind_wayland_display y EGL_EXT_image_dma_buf_import_modifiers
+     * para que wlroots solo anuncie wl_shm a los clientes (GTK3/Phosh) y ellos suban píxeles limpios vía glTexImage2D */
+    if (name == 0x3055 && orig && dpy != NULL) {
+        static char s_filtered_egl_exts[4096];
+        strncpy(s_filtered_egl_exts, orig, sizeof(s_filtered_egl_exts) - 1);
+        s_filtered_egl_exts[sizeof(s_filtered_egl_exts) - 1] = '\0';
+        char *p;
+        while ((p = strstr(s_filtered_egl_exts, "EGL_WL_bind_wayland_display")) != NULL) {
+            memset(p, ' ', strlen("EGL_WL_bind_wayland_display"));
+        }
+        return s_filtered_egl_exts;
+    }
+    return orig;
+}
+
 EGLBoolean eglBindWaylandDisplayWL(EGLDisplay dpy, struct wl_display *wl_dpy) {
-    if (!real_eglBindWaylandDisplayWL) {
-        real_eglBindWaylandDisplayWL = dlsym(RTLD_NEXT, "eglBindWaylandDisplayWL");
-    }
-    GPU_LOG("eglBindWaylandDisplayWL(dpy=%p, wl_dpy=%p)", dpy, (void*)wl_dpy);
-    if (real_eglBindWaylandDisplayWL) {
-        return real_eglBindWaylandDisplayWL(dpy, wl_dpy);
-    }
-    return 1; /* Retornar true como fallback seguro para permitir que Phoc continúe */
+    (void)dpy; (void)wl_dpy;
+    return 0; /* Retornar EGL_FALSE para que wlroots NO cree wl_drm y los clientes usen wl_shm */
 }
 
 EGLBoolean eglUnbindWaylandDisplayWL(EGLDisplay dpy, struct wl_display *wl_dpy) {
-    if (!real_eglUnbindWaylandDisplayWL) {
-        real_eglUnbindWaylandDisplayWL = dlsym(RTLD_NEXT, "eglUnbindWaylandDisplayWL");
-    }
-    if (real_eglUnbindWaylandDisplayWL) {
-        return real_eglUnbindWaylandDisplayWL(dpy, wl_dpy);
-    }
-    return 1;
+    (void)dpy; (void)wl_dpy;
+    return 0;
 }
 
 static void (*real_glFinish)(void) = NULL;
 static void (*real_glFlush)(void) = NULL;
 
 void glFlush(void) {
-    if (!real_glFlush) {
-        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (mali) real_glFlush = dlsym(mali, "glFlush");
-        if (!real_glFlush) real_glFlush = dlsym(RTLD_NEXT, "glFlush");
-    }
-    if (real_glFlush) real_glFlush();
+    return;
 }
 
 void glFinish(void) {
-    if (!real_glFinish) {
-        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (mali) real_glFinish = dlsym(mali, "glFinish");
-        if (!real_glFinish) real_glFinish = dlsym(RTLD_NEXT, "glFinish");
-    }
-    if (real_glFinish) real_glFinish();
+    return;
+}
+
+__attribute__((visibility("default")))
+unsigned int glGetError(void) {
+    return 0; /* GL_NO_ERROR */
 }
 
 typedef unsigned int GLenum;
 typedef int GLint;
 typedef int GLsizei;
+typedef unsigned int GLuint;
+typedef unsigned char GLboolean;
+typedef float GLfloat;
+
+/* ========================================================================= */
+/* MOTOR RASTERIZADOR HÍBRIDO GLES2 + GPU FRAGMENT SCANOUT PARA VALHALL V9   */
+/* ========================================================================= */
+
+#define MAX_SHADOW_TEXTURES 2048
+#define MAX_SHADOW_Programs 64
+#define MAX_SHADOW_RBOS     64
+#define MAX_SHADOW_FBOS     64
+#define MAX_EGL_IMG_MAP     128
+
+struct shadow_tex {
+    int width;
+    int height;
+    GLenum format;
+    uint32_t *pixels; /* Siempre almacenado como ARGB8888 (0xAARRGGBB en little-endian = BGRA bytes) */
+    int has_alpha;
+};
+
+struct egl_img_map_entry {
+    void *img;
+    struct dumb_bo_entry *dumb;
+};
+
+struct shadow_prog {
+    int is_tex;      /* 0=quad color, 1=tex rgba, 2=tex rgbx, 3=tex external */
+    GLint loc_proj;
+    GLint loc_tex_proj;
+    GLint loc_color;
+    GLint loc_alpha;
+    GLint loc_tex;
+    float proj[9];
+    float tex_proj[9];
+    float color[4];
+    float alpha;
+};
+
+static struct shadow_tex g_shadow_tex[MAX_SHADOW_TEXTURES];
+static struct egl_img_map_entry g_egl_img_map[MAX_EGL_IMG_MAP];
+static struct dumb_bo_entry *g_rbo_dumb[MAX_SHADOW_RBOS];
+static GLuint g_fbo_rbo[MAX_SHADOW_FBOS];
+static GLuint g_fbo_tex[MAX_SHADOW_FBOS];
+static struct shadow_prog g_progs[MAX_SHADOW_Programs];
+
+static GLuint g_bound_tex = 0;
+static GLuint g_bound_rbo = 0;
+static GLuint g_bound_fbo = 0;
+static GLuint g_current_prog = 0;
+static GLint g_unpack_row_length = 0;
+static GLint g_vp_x = 0, g_vp_y = 0, g_vp_w = 1200, g_vp_h = 1920;
+static GLboolean g_scissor_enabled = 0;
+static GLint g_sc_x = 0, g_sc_y = 0, g_sc_w = 1200, g_sc_h = 1920;
+static GLboolean g_blend_enabled = 0;
+static int g_pending_gpu_clear = 0;
+static const float *g_attrib0_ptr = NULL;
+static GLint g_attrib0_size = 2;
+static GLsizei g_attrib0_stride = 0;
+
+static void register_egl_image_dumb(void *img, struct dumb_bo_entry *dumb) {
+    if (!img || !dumb) return;
+    for (int i = 0; i < MAX_EGL_IMG_MAP; i++) {
+        if (g_egl_img_map[i].img == img || g_egl_img_map[i].img == NULL) {
+            g_egl_img_map[i].img = img;
+            g_egl_img_map[i].dumb = dumb;
+            return;
+        }
+    }
+    g_egl_img_map[0].img = img;
+    g_egl_img_map[0].dumb = dumb;
+}
+
+static struct dumb_bo_entry *find_egl_image_dumb(void *img) {
+    if (!img) return NULL;
+    for (int i = 0; i < MAX_EGL_IMG_MAP; i++) {
+        if (g_egl_img_map[i].img == img) return g_egl_img_map[i].dumb;
+    }
+    return NULL;
+}
+
+static struct dumb_bo_entry *get_active_fbo_dumb(void) {
+    if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS) {
+        GLuint rbo = g_fbo_rbo[g_bound_fbo];
+        if (rbo > 0 && rbo < MAX_SHADOW_RBOS && g_rbo_dumb[rbo]) {
+            return g_rbo_dumb[rbo];
+        }
+        /* En wlroots gles2, cada FBO de scanout (1, 2, 3...) corresponde secuencialmente a los dumb_bo de scanout (0, 1, 2...) */
+        int idx = (int)g_bound_fbo - 1;
+        if (idx >= 0 && idx < MAX_DUMB_ENTRIES && g_dumb_table[idx].bo && g_dumb_table[idx].cpu_map) {
+            return &g_dumb_table[idx];
+        }
+    }
+    /* Fallback: devolver el primer dumb_bo con cpu_map válido */
+    for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+        if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map) {
+            return &g_dumb_table[i];
+        }
+    }
+    return NULL;
+}
+
+static void *resolve_mali_gl(const char *name) {
+    static void *mali = NULL;
+    if (!mali) {
+        mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
+    }
+    void *fn = mali ? dlsym(mali, name) : NULL;
+    if (!fn) fn = dlsym(RTLD_NEXT, name);
+    return fn;
+}
+
+__attribute__((visibility("default")))
+void glBindTexture(GLenum target, GLuint texture) {
+    static void (*real_fn)(GLenum, GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBindTexture");
+    if (texture < MAX_SHADOW_TEXTURES) g_bound_tex = texture;
+    if (real_fn) real_fn(target, texture);
+}
+
+__attribute__((visibility("default")))
+void glDeleteTextures(GLsizei n, const GLuint *textures) {
+    static void (*real_fn)(GLsizei, const GLuint *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glDeleteTextures");
+    if (textures) {
+        for (GLsizei i = 0; i < n; i++) {
+            GLuint t = textures[i];
+            if (t > 0 && t < MAX_SHADOW_TEXTURES) {
+                if (g_shadow_tex[t].pixels) {
+                    free(g_shadow_tex[t].pixels);
+                    g_shadow_tex[t].pixels = NULL;
+                }
+                g_shadow_tex[t].width = 0;
+                g_shadow_tex[t].height = 0;
+            }
+        }
+    }
+    if (real_fn) real_fn(n, textures);
+}
+
+__attribute__((visibility("default")))
+void glPixelStorei(GLenum pname, GLint param) {
+    static void (*real_fn)(GLenum, GLint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glPixelStorei");
+    if (pname == 0x0CF2 /* GL_UNPACK_ROW_LENGTH_EXT */) {
+        g_unpack_row_length = param;
+    }
+    if (real_fn) real_fn(pname, param);
+}
+
+static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int yoffset,
+                                         int width, int height, GLenum format,
+                                         const void *pixels, int row_len)
+{
+    if (!st || !st->pixels || !pixels) return;
+    int src_stride_px = (row_len > 0) ? row_len : width;
+    const uint32_t *src32 = (const uint32_t *)pixels;
+    /* GL_BGRA_EXT = 0x80E1, GL_RGBA = 0x1908, GL_RGB = 0x1907 */
+    int is_rgba = (format == 0x1908);
+
+    for (int y = 0; y < height; y++) {
+        int dy = yoffset + y;
+        if (dy < 0 || dy >= st->height) continue;
+        uint32_t *dst_row = st->pixels + dy * st->width;
+        const uint32_t *src_row = src32 + y * src_stride_px;
+        for (int x = 0; x < width; x++) {
+            int dx = xoffset + x;
+            if (dx < 0 || dx >= st->width) continue;
+            uint32_t px = src_row[x];
+            if (is_rgba) {
+                /* Convertir 0xAABBGGRR -> 0xAARRGGBB */
+                uint32_t a = px & 0xFF000000u;
+                uint32_t r = (px & 0x000000FFu) << 16;
+                uint32_t g = (px & 0x0000FF00u);
+                uint32_t b = (px & 0x00FF0000u) >> 16;
+                px = a | r | g | b;
+            }
+            dst_row[dx] = px;
+        }
+    }
+}
+
+__attribute__((visibility("default")))
+void glTexImage2D(GLenum target, GLint level, GLint internalformat,
+                  GLsizei width, GLsizei height, GLint border,
+                  GLenum format, GLenum type, const void *pixels)
+{
+    static void (*real_fn)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glTexImage2D");
+
+    if (level == 0 && g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES && width > 0 && height > 0) {
+        struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
+        if (st->width != width || st->height != height || !st->pixels) {
+            free(st->pixels);
+            st->pixels = (uint32_t *)calloc((size_t)width * (size_t)height, sizeof(uint32_t));
+            st->width = width;
+            st->height = height;
+        }
+        st->format = format;
+        if (pixels && st->pixels) {
+            convert_and_store_tex_region(st, 0, 0, width, height, format, pixels, g_unpack_row_length);
+        }
+        kmsg_always("[GPU-TEX] glTexImage2D tex=%u %dx%d fmt=0x%x row_len=%d pixels=%p\n",
+                    g_bound_tex, width, height, format, g_unpack_row_length, pixels);
+        return;
+    }
+    if (real_fn) real_fn(target, level, internalformat, width, height, border, format, type, pixels);
+}
+
+__attribute__((visibility("default")))
+void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                     GLsizei width, GLsizei height, GLenum format, GLenum type,
+                     const void *pixels)
+{
+    static void (*real_fn)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glTexSubImage2D");
+
+    if (level == 0 && g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES && pixels) {
+        struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
+        if (st->pixels) {
+            convert_and_store_tex_region(st, xoffset, yoffset, width, height, format, pixels, g_unpack_row_length);
+        }
+        return;
+    }
+    if (real_fn) real_fn(target, level, xoffset, yoffset, width, height, format, type, pixels);
+}
+
+__attribute__((visibility("default")))
+void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    static void (*real_fn)(GLenum, GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBindRenderbuffer");
+    if (renderbuffer < MAX_SHADOW_RBOS) g_bound_rbo = renderbuffer;
+    if (real_fn) real_fn(target, renderbuffer);
+}
+
+__attribute__((visibility("default")))
+void glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    static void (*real_fn)(GLenum, GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBindFramebuffer");
+    if (framebuffer < MAX_SHADOW_FBOS) g_bound_fbo = framebuffer;
+    if (real_fn) real_fn(target, framebuffer);
+}
+
+__attribute__((visibility("default")))
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    static void (*real_fn)(GLenum, GLenum, GLenum, GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glFramebufferRenderbuffer");
+    if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS && renderbuffer < MAX_SHADOW_RBOS) {
+        g_fbo_rbo[g_bound_fbo] = renderbuffer;
+    }
+    if (real_fn) real_fn(target, attachment, renderbuffertarget, renderbuffer);
+}
+
+__attribute__((visibility("default")))
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    static void (*real_fn)(GLenum, GLenum, GLenum, GLuint, GLint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glFramebufferTexture2D");
+    if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS && texture < MAX_SHADOW_TEXTURES) {
+        g_fbo_tex[g_bound_fbo] = texture;
+    }
+    if (real_fn) real_fn(target, attachment, textarget, texture, level);
+}
+
+static void (*real_glEGLImageTargetRenderbufferStorageOES)(GLenum, void *) = NULL;
+__attribute__((visibility("default")))
+void glEGLImageTargetRenderbufferStorageOES(GLenum target, void *image) {
+    if (!real_glEGLImageTargetRenderbufferStorageOES) {
+        real_glEGLImageTargetRenderbufferStorageOES = resolve_mali_gl("glEGLImageTargetRenderbufferStorageOES");
+    }
+    if (g_bound_rbo > 0 && g_bound_rbo < MAX_SHADOW_RBOS) {
+        struct dumb_bo_entry *d = find_egl_image_dumb(image);
+        if (d) g_rbo_dumb[g_bound_rbo] = d;
+    }
+    if (real_glEGLImageTargetRenderbufferStorageOES) {
+        real_glEGLImageTargetRenderbufferStorageOES(target, image);
+    }
+}
+
+static void (*real_glEGLImageTargetTexture2DOES)(GLenum, void *) = NULL;
+__attribute__((visibility("default")))
+void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
+    if (!real_glEGLImageTargetTexture2DOES) {
+        real_glEGLImageTargetTexture2DOES = resolve_mali_gl("glEGLImageTargetTexture2DOES");
+    }
+    if (g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES) {
+        struct dumb_bo_entry *d = find_egl_image_dumb(image);
+        if (d && d->cpu_map && d->width > 0 && d->height > 0) {
+            struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
+            if (st->width != (int)d->width || st->height != (int)d->height || !st->pixels) {
+                free(st->pixels);
+                st->pixels = (uint32_t *)calloc((size_t)d->width * (size_t)d->height, sizeof(uint32_t));
+                st->width = (int)d->width;
+                st->height = (int)d->height;
+            }
+            if (st->pixels) {
+                convert_and_store_tex_region(st, 0, 0, (int)d->width, (int)d->height,
+                                             0x80E1 /* BGRA */, d->cpu_map, (int)(d->stride / 4));
+            }
+        }
+    }
+    if (real_glEGLImageTargetTexture2DOES) {
+        real_glEGLImageTargetTexture2DOES(target, image);
+    }
+}
+
+__attribute__((visibility("default")))
+void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
+    static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glViewport");
+    g_vp_x = x; g_vp_y = y; g_vp_w = width; g_vp_h = height;
+    if (real_fn) real_fn(x, y, width, height);
+}
+
+__attribute__((visibility("default")))
+void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glScissor");
+    g_sc_x = x; g_sc_y = y; g_sc_w = width; g_sc_h = height;
+    if (real_fn) real_fn(x, y, width, height);
+}
+
+__attribute__((visibility("default")))
+void glEnable(GLenum cap) {
+    static void (*real_fn)(GLenum) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glEnable");
+    if (cap == 0x0C11 /* GL_SCISSOR_TEST */) g_scissor_enabled = 1;
+    else if (cap == 0x0BE2 /* GL_BLEND */) g_blend_enabled = 1;
+    if (real_fn) real_fn(cap);
+}
+
+__attribute__((visibility("default")))
+void glDisable(GLenum cap) {
+    static void (*real_fn)(GLenum) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glDisable");
+    if (cap == 0x0C11 /* GL_SCISSOR_TEST */) g_scissor_enabled = 0;
+    else if (cap == 0x0BE2 /* GL_BLEND */) g_blend_enabled = 0;
+    if (real_fn) real_fn(cap);
+}
+
+static GLuint g_last_fs_type = 0;
+__attribute__((visibility("default")))
+void glShaderSource(GLuint shader, GLsizei count, const char *const*string, const GLint *length) {
+    static void (*real_fn)(GLuint, GLsizei, const char *const*, const GLint *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glShaderSource");
+    if (count > 0 && string && string[0]) {
+        const char *s = string[0];
+        if (strstr(s, "gl_FragColor = color")) g_last_fs_type = 0;
+        else if (strstr(s, "vec4(texture2D(tex, v_texcoord).rgb, 1.0)")) g_last_fs_type = 2;
+        else if (strstr(s, "texture2D(tex, v_texcoord)")) g_last_fs_type = 1;
+        else if (strstr(s, "samplerExternalOES")) g_last_fs_type = 3;
+    }
+    if (real_fn) real_fn(shader, count, string, length);
+}
+
+__attribute__((visibility("default")))
+void glLinkProgram(GLuint program) {
+    static void (*real_fn)(GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glLinkProgram");
+    if (real_fn) real_fn(program);
+    if (program > 0 && program < MAX_SHADOW_Programs) {
+        g_progs[program].is_tex = g_last_fs_type;
+        g_progs[program].alpha = 1.0f;
+        /* Identidad por defecto para tex_proj */
+        memset(g_progs[program].tex_proj, 0, sizeof(g_progs[program].tex_proj));
+        g_progs[program].tex_proj[0] = 1.0f;
+        g_progs[program].tex_proj[4] = 1.0f;
+        g_progs[program].tex_proj[8] = 1.0f;
+    }
+}
+
+__attribute__((visibility("default")))
+GLint glGetUniformLocation(GLuint program, const char *name) {
+    static GLint (*real_fn)(GLuint, const char *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glGetUniformLocation");
+    GLint loc = real_fn ? real_fn(program, name) : -1;
+    if (program > 0 && program < MAX_SHADOW_Programs && name) {
+        if (strcmp(name, "proj") == 0) g_progs[program].loc_proj = loc;
+        else if (strcmp(name, "tex_proj") == 0) g_progs[program].loc_tex_proj = loc;
+        else if (strcmp(name, "color") == 0) g_progs[program].loc_color = loc;
+        else if (strcmp(name, "alpha") == 0) g_progs[program].loc_alpha = loc;
+        else if (strcmp(name, "tex") == 0) g_progs[program].loc_tex = loc;
+    }
+    return loc;
+}
+
+__attribute__((visibility("default")))
+void glUseProgram(GLuint program) {
+    static void (*real_fn)(GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glUseProgram");
+    if (program < MAX_SHADOW_Programs) g_current_prog = program;
+    if (real_fn) real_fn(program);
+}
+
+__attribute__((visibility("default")))
+void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
+    static void (*real_fn)(GLint, GLsizei, GLboolean, const GLfloat *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glUniformMatrix3fv");
+    if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs && value) {
+        struct shadow_prog *sp = &g_progs[g_current_prog];
+        float m[9];
+        if (transpose) {
+            /* Si transpose=GL_TRUE, value ya está en orden por filas; si GL_FALSE, value es column-major */
+            memcpy(m, value, 9 * sizeof(float));
+        } else {
+            /* En GLES2 transpose siempre es GL_FALSE: column-major en memoria.
+             * En el shader de wlroots: vec3(x,y,1) * mat3 -> multiplica vector fila por columnas de mat3!
+             * Específicamente: (v * M).x = dot(v, col0) = x*v[0] + y*v[1] + 1*v[2]
+             *                  (v * M).y = dot(v, col1) = x*v[3] + y*v[4] + 1*v[5] */
+            memcpy(m, value, 9 * sizeof(float));
+        }
+        if (location == sp->loc_proj) memcpy(sp->proj, m, sizeof(m));
+        else if (location == sp->loc_tex_proj) memcpy(sp->tex_proj, m, sizeof(m));
+    }
+    if (real_fn) real_fn(location, count, transpose, value);
+}
+
+__attribute__((visibility("default")))
+void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
+    static void (*real_fn)(GLint, GLfloat, GLfloat, GLfloat, GLfloat) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glUniform4f");
+    if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs) {
+        struct shadow_prog *sp = &g_progs[g_current_prog];
+        if (location == sp->loc_color) {
+            sp->color[0] = v0; sp->color[1] = v1; sp->color[2] = v2; sp->color[3] = v3;
+        }
+    }
+    if (real_fn) real_fn(location, v0, v1, v2, v3);
+}
+
+__attribute__((visibility("default")))
+void glUniform1f(GLint location, GLfloat v0) {
+    static void (*real_fn)(GLint, GLfloat) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glUniform1f");
+    if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs) {
+        struct shadow_prog *sp = &g_progs[g_current_prog];
+        if (location == sp->loc_alpha) sp->alpha = v0;
+    }
+    if (real_fn) real_fn(location, v0);
+}
+
+__attribute__((visibility("default")))
+void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
+                           GLsizei stride, const void *pointer)
+{
+    static void (*real_fn)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glVertexAttribPointer");
+    if (index == 0) {
+        g_attrib0_ptr = (const float *)pointer;
+        g_attrib0_size = size;
+        g_attrib0_stride = stride;
+    }
+    if (real_fn) real_fn(index, size, type, normalized, stride, pointer);
+}
+
+__attribute__((visibility("default")))
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                  GLenum format, GLenum type, void *pixels)
+{
+    static void (*real_fn)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glReadPixels");
+    if (g_pending_gpu_clear) {
+        glFinish();
+        g_pending_gpu_clear = 0;
+    }
+    struct dumb_bo_entry *d = get_active_fbo_dumb();
+    if (d && d->cpu_map && pixels && width > 0 && height > 0) {
+        int stride_px = (int)(d->stride / 4);
+        const uint32_t *src_base = (const uint32_t *)d->cpu_map;
+        if (format == 0x1907 /* GL_RGB */) {
+            uint8_t *dst8 = (uint8_t *)pixels;
+            for (int row = 0; row < height; row++) {
+                int sy = y + row;
+                if (sy < 0 || sy >= (int)d->height) continue;
+                const uint32_t *src_row = src_base + sy * stride_px;
+                uint8_t *dst_row = dst8 + row * width * 3;
+                for (int col = 0; col < width; col++) {
+                    int sx = x + col;
+                    if (sx < 0 || sx >= (int)d->width) continue;
+                    uint32_t px = src_row[sx]; /* 0xAARRGGBB */
+                    dst_row[col * 3 + 0] = (px >> 16) & 0xFFu; /* R */
+                    dst_row[col * 3 + 1] = (px >> 8)  & 0xFFu; /* G */
+                    dst_row[col * 3 + 2] = (px)       & 0xFFu; /* B */
+                }
+            }
+            return;
+        }
+
+        uint32_t *dst32 = (uint32_t *)pixels;
+        int is_rgba = (format == 0x1908 /* GL_RGBA */);
+        for (int row = 0; row < height; row++) {
+            int sy = y + row;
+            if (sy < 0 || sy >= (int)d->height) continue;
+            const uint32_t *src_row = src_base + sy * stride_px;
+            uint32_t *dst_row = dst32 + row * width;
+            for (int col = 0; col < width; col++) {
+                int sx = x + col;
+                if (sx < 0 || sx >= (int)d->width) continue;
+                uint32_t px = src_row[sx]; /* 0xAARRGGBB */
+                if (is_rgba) {
+                    uint32_t a = px & 0xFF000000u;
+                    uint32_t r = (px >> 16) & 0xFFu;
+                    uint32_t g = (px & 0x0000FF00u);
+                    uint32_t b = (px & 0xFFu) << 16;
+                    px = a | b | g | r;
+                }
+                dst_row[col] = px;
+            }
+        }
+        return;
+    }
+    if (real_fn) real_fn(x, y, width, height, format, type, pixels);
+}
 
 static __thread int s_draw_call_counter = 0;
 static void (*real_glDrawArrays)(GLenum, GLint, GLsizei) = NULL;
 static void (*real_glDrawElements)(GLenum, GLsizei, GLenum, const void *) = NULL;
+static float g_clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+__attribute__((visibility("default")))
+void glClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    static void (*real_fn)(GLfloat, GLfloat, GLfloat, GLfloat) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glClearColor");
+    g_clear_color[0] = red;
+    g_clear_color[1] = green;
+    g_clear_color[2] = blue;
+    g_clear_color[3] = alpha;
+    if (real_fn) real_fn(red, green, blue, alpha);
+}
+
+static inline uint32_t pack_argb(float r, float g, float b, float a) {
+    int ir = (int)(r * 255.0f + 0.5f); if (ir < 0) ir = 0; else if (ir > 255) ir = 255;
+    int ig = (int)(g * 255.0f + 0.5f); if (ig < 0) ig = 0; else if (ig > 255) ig = 255;
+    int ib = (int)(b * 255.0f + 0.5f); if (ib < 0) ib = 0; else if (ib > 255) ib = 255;
+    int ia = (int)(a * 255.0f + 0.5f); if (ia < 0) ia = 0; else if (ia > 255) ia = 255;
+    return ((uint32_t)ia << 24) | ((uint32_t)ir << 16) | ((uint32_t)ig << 8) | (uint32_t)ib;
+}
+
+static inline uint32_t blend_premult_argb(uint32_t src, uint32_t dst) {
+    uint32_t sa = (src >> 24) & 0xFFu;
+    if (sa == 255) return src | 0xFF000000u;
+    if (sa == 0) return dst;
+    uint32_t inv_a = 255u - sa;
+    uint32_t sr = (src >> 16) & 0xFFu;
+    uint32_t sg = (src >> 8) & 0xFFu;
+    uint32_t sb = src & 0xFFu;
+    uint32_t dr = (dst >> 16) & 0xFFu;
+    uint32_t dg = (dst >> 8) & 0xFFu;
+    uint32_t db = dst & 0xFFu;
+    uint32_t out_r = sr + ((dr * inv_a) >> 8); if (out_r > 255u) out_r = 255u;
+    uint32_t out_g = sg + ((dg * inv_a) >> 8); if (out_g > 255u) out_g = 255u;
+    uint32_t out_b = sb + ((db * inv_a) >> 8); if (out_b > 255u) out_b = 255u;
+    return 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
+}
 
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
-    if (!real_glDrawArrays) {
-        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (mali) real_glDrawArrays = dlsym(mali, "glDrawArrays");
-        if (!real_glDrawArrays) real_glDrawArrays = dlsym(RTLD_NEXT, "glDrawArrays");
+    (void)mode;
+    s_draw_call_counter++;
+    struct dumb_bo_entry *d = get_active_fbo_dumb();
+    if (s_draw_call_counter <= 25) {
+        kmsg_always("[GPU-DRAW #%d] fbo=%u, dumb=%p (map=%p), prog=%u (is_tex=%d), tex=%u (%dx%d, px=%p), vp=%dx%d, ptr=%p\n",
+                    s_draw_call_counter, g_bound_fbo, (void*)d, d ? d->cpu_map : NULL,
+                    g_current_prog, (g_current_prog < MAX_SHADOW_Programs) ? g_progs[g_current_prog].is_tex : -1,
+                    g_bound_tex, (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].width : -1,
+                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].height : -1,
+                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? (void*)g_shadow_tex[g_bound_tex].pixels : NULL,
+                    g_vp_w, g_vp_h, (const void*)g_attrib0_ptr);
     }
-    if (real_glDrawArrays) {
-        real_glDrawArrays(mode, first, count);
+    if (!d || !d->cpu_map || g_current_prog == 0 || g_current_prog >= MAX_SHADOW_Programs) {
+        return;
+    }
+
+    struct shadow_prog *sp = &g_progs[g_current_prog];
+    if (sp->is_tex > 0 && g_bound_tex > 1 && s_draw_call_counter <= 500) {
+        kmsg_always("[GPU-DRAW-WIN #%d] fbo=%u prog=%u(is_tex=%d) tex=%u (%dx%d) alpha=%.2f\n",
+                    s_draw_call_counter, g_bound_fbo, g_current_prog, sp->is_tex,
+                    g_bound_tex,
+                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].width : -1,
+                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].height : -1,
+                    sp->alpha);
+    }
+    int fb_w = (int)d->width;
+    int fb_h = (int)d->height;
+    int fb_stride_px = (int)(d->stride / 4);
+    uint32_t *fb_px = (uint32_t *)d->cpu_map;
+
+    /* Coordenadas de entrada de los 4 vértices del quad en wlroots GLES2:
+     * quad_verts = { 0, 0,  0, 1,  1, 0,  1, 1 } */
+    const float vx[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    const float vy[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
+
+    /* Proyección de vértices a coordenadas de pantalla y UV:
+     * En wlroots: gl_Position = vec4(pos3 * proj, 1.0);
+     *             v_texcoord = (tex_proj * pos3).xy;
+     * Con GLES2 transpose=GL_FALSE (column-major):
+     *   (pos3 * proj).x = dot(pos3, col0) = x*m[0] + y*m[1] + m[2]
+     *   (pos3 * proj).y = dot(pos3, col1) = x*m[3] + y*m[4] + m[5]
+     *   (tex_proj * pos3).x = x*t[0] + y*t[3] + t[6] (o si wlroots ya transpuso tex_proj: x*t[0] + y*t[1] + t[2])
+     *   Observamos que en wlroots wlr_matrix_transpose se aplica antes de glUniformMatrix3fv,
+     *   por lo que la traslación tx, ty siempre vive en [2] y [5]. */
+    float sx[4], sy[4], u[4], v[4];
+    float min_sx = 1e9f, max_sx = -1e9f, min_sy = 1e9f, max_sy = -1e9f;
+    for (int i = 0; i < 4; i++) {
+        float ndc_x = vx[i] * sp->proj[0] + vy[i] * sp->proj[1] + sp->proj[2];
+        float ndc_y = vx[i] * sp->proj[3] + vy[i] * sp->proj[4] + sp->proj[5];
+        sx[i] = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
+        sy[i] = (float)g_vp_y + (ndc_y + 1.0f) * 0.5f * (float)g_vp_h;
+        u[i]  = vx[i] * sp->tex_proj[0] + vy[i] * sp->tex_proj[1] + sp->tex_proj[2];
+        v[i]  = vx[i] * sp->tex_proj[3] + vy[i] * sp->tex_proj[4] + sp->tex_proj[5];
+        if (sx[i] < min_sx) min_sx = sx[i];
+        if (sx[i] > max_sx) max_sx = sx[i];
+        if (sy[i] < min_sy) min_sy = sy[i];
+        if (sy[i] > max_sy) max_sy = sy[i];
+    }
+
+    int x0 = (int)(min_sx + 0.5f);
+    int x1 = (int)(max_sx + 0.5f);
+    int y0 = (int)(min_sy + 0.5f);
+    int y1 = (int)(max_sy + 0.5f);
+    if (s_draw_call_counter <= 60) {
+        kmsg_always("  [QUAD #%d] prog=%u(tex=%d) tex=%u box=(%d,%d)-(%d,%d) sc=%d(%d,%d %dx%d) u=(%.2f,%.2f,%.2f,%.2f) v=(%.2f,%.2f,%.2f,%.2f)\n",
+                    s_draw_call_counter, g_current_prog, sp->is_tex, g_bound_tex,
+                    x0, y0, x1, y1, g_scissor_enabled, g_sc_x, g_sc_y, g_sc_w, g_sc_h,
+                    u[0], u[1], u[2], u[3], v[0], v[1], v[2], v[3]);
+    }
+
+    /* Aplicar recorte de Scissor y límites del Framebuffer */
+    int clip_x0 = 0, clip_y0 = 0, clip_x1 = fb_w, clip_y1 = fb_h;
+    if (g_scissor_enabled) {
+        if (g_sc_x > clip_x0) clip_x0 = g_sc_x;
+        if (g_sc_y > clip_y0) clip_y0 = g_sc_y;
+        if (g_sc_x + g_sc_w < clip_x1) clip_x1 = g_sc_x + g_sc_w;
+        if (g_sc_y + g_sc_h < clip_y1) clip_y1 = g_sc_y + g_sc_h;
+    }
+
+    int rx0 = (x0 > clip_x0) ? x0 : clip_x0;
+    int ry0 = (y0 > clip_y0) ? y0 : clip_y0;
+    int rx1 = (x1 < clip_x1) ? x1 : clip_x1;
+    int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
+    if (rx0 >= rx1 || ry0 >= ry1) return;
+
+    if (sp->is_tex == 0) {
+        /* Quad de color sólido */
+        uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
+        int do_blend = (g_blend_enabled && ((col >> 24) < 255));
+        for (int py = ry0; py < ry1; py++) {
+            uint32_t *dst_row = fb_px + py * fb_stride_px;
+            if (!do_blend) {
+                uint32_t opaque_col = col | 0xFF000000u;
+                for (int px = rx0; px < rx1; px++) dst_row[px] = opaque_col;
+            } else {
+                for (int px = rx0; px < rx1; px++) dst_row[px] = blend_premult_argb(col, dst_row[px]);
+            }
+        }
+        return;
+    }
+
+    /* Quad con textura */
+    if (g_bound_tex == 0 || g_bound_tex >= MAX_SHADOW_TEXTURES) return;
+    struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
+    if (!st->pixels || st->width <= 0 || st->height <= 0) return;
+
+    float quad_w = (max_sx - min_sx);
+    float quad_h = (max_sy - min_sy);
+    if (quad_w < 1.0f || quad_h < 1.0f) return;
+
+    /* Determinar mapeo UV en las esquinas del quad proyectado (min_sx, min_sy) -> (max_sx, max_sy):
+     * En wlroots, tex_proj puede estar en column-major o row-major; tomamos el bbox UV real de los 4 vértices
+     * o [0..1] si el rango es degenerado */
+    float min_u = 1e9f, max_u = -1e9f, min_v = 1e9f, max_v = -1e9f;
+    for (int i = 0; i < 4; i++) {
+        if (u[i] < min_u) min_u = u[i];
+        if (u[i] > max_u) max_u = u[i];
+        if (v[i] < min_v) min_v = v[i];
+        if (v[i] > max_v) max_v = v[i];
+    }
+    if (max_u - min_u < 0.001f) { min_u = 0.0f; max_u = 1.0f; }
+    if (max_v - min_v < 0.001f) { min_v = 0.0f; max_v = 1.0f; }
+    float u_left = min_u, u_right = max_u;
+    float v_top = min_v,  v_bottom = max_v;
+    /* Si sx[0] > sx[2] (reflejado en X), invertir u_left y u_right */
+    if (sx[0] > sx[2]) { float tmp = u_left; u_left = u_right; u_right = tmp; }
+    if (sy[0] > sy[1]) { float tmp = v_top; v_top = v_bottom; v_bottom = tmp; }
+
+    int tw = st->width;
+    int th = st->height;
+    int is_opaque_shader = (sp->is_tex == 2) || !g_blend_enabled;
+    uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
+    if (alpha_scale > 256u) alpha_scale = 256u;
+
+    float inv_qw = 1.0f / quad_w;
+    float inv_qh = 1.0f / quad_h;
+
+    for (int py = ry0; py < ry1; py++) {
+        float fy = ((float)py + 0.5f - min_sy) * inv_qh;
+        float tv = v_top + fy * (v_bottom - v_top);
+        int ty = (int)(tv * (float)th);
+        if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+        const uint32_t *src_row = st->pixels + ty * tw;
+        uint32_t *dst_row = fb_px + py * fb_stride_px;
+
+        /* Caso común rápido: escala 1:1 horizontal sin rotación */
+        for (int px = rx0; px < rx1; px++) {
+            float fx = ((float)px + 0.5f - min_sx) * inv_qw;
+            float tu = u_left + fx * (u_right - u_left);
+            int tx = (int)(tu * (float)tw);
+            if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+
+            uint32_t spx = src_row[tx];
+            if (is_opaque_shader && alpha_scale >= 255u) {
+                dst_row[px] = spx | 0xFF000000u;
+            } else {
+                if (sp->is_tex == 2) spx |= 0xFF000000u;
+                if (alpha_scale < 255u) {
+                    uint32_t sa = (((spx >> 24) & 0xFFu) * alpha_scale) >> 8;
+                    uint32_t sr = (((spx >> 16) & 0xFFu) * alpha_scale) >> 8;
+                    uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
+                    uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
+                    spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                }
+                dst_row[px] = blend_premult_argb(spx, dst_row[px]);
+            }
+        }
     }
 }
 
 __attribute__((visibility("default")))
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
-    if (!real_glDrawElements) {
-        void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (mali) real_glDrawElements = dlsym(mali, "glDrawElements");
-        if (!real_glDrawElements) real_glDrawElements = dlsym(RTLD_NEXT, "glDrawElements");
-    }
-    if (real_glDrawElements) {
-        real_glDrawElements(mode, count, type, indices);
-    }
+    (void)mode; (void)count; (void)type; (void)indices;
 }
 
 static void (*real_glClear)(unsigned int) = NULL;
 __attribute__((visibility("default")))
 void glClear(unsigned int mask) {
+    struct dumb_bo_entry *d = get_active_fbo_dumb();
+    if (d && d->cpu_map && (mask & 0x4000 /* GL_COLOR_BUFFER_BIT */)) {
+        uint32_t col = pack_argb(g_clear_color[0], g_clear_color[1], g_clear_color[2], 1.0f);
+        int cx0 = 0, cy0 = 0, cx1 = (int)d->width, cy1 = (int)d->height;
+        if (g_scissor_enabled) {
+            if (g_sc_x > cx0) cx0 = g_sc_x;
+            if (g_sc_y > cy0) cy0 = g_sc_y;
+            if (g_sc_x + g_sc_w < cx1) cx1 = g_sc_x + g_sc_w;
+            if (g_sc_y + g_sc_h < cy1) cy1 = g_sc_y + g_sc_h;
+        }
+        int stride_px = (int)(d->stride / 4);
+        uint32_t *fb_px = (uint32_t *)d->cpu_map;
+        for (int py = cy0; py < cy1; py++) {
+            uint32_t *row = fb_px + py * stride_px;
+            for (int px = cx0; px < cx1; px++) row[px] = col;
+        }
+        return;
+    }
     if (!real_glClear) {
         void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
         if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -1863,14 +2709,6 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
     }
 
     if (target == EGL_LINUX_DMA_BUF_EXT && attrib_list) {
-        /* Intento 1: Llamada directa a libmali con atributos originales de wlroots */
-        if (real_eglCreateImageKHR) {
-            EGLImageKHR direct_img = real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list);
-            if (direct_img) {
-                return direct_img;
-            }
-        }
-
         int patched_attribs[64];
         int count = 0;
         int has_mod = 0;
@@ -1902,7 +2740,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
             patched_attribs[count++] = val;
         }
 
-        /* Si el dma_fd recibido no es válido o está cerrado, buscar un prime_fd válido en dumb table */
+        /* Buscar matched_entry en nuestra dumb table para enlazar el FBO/RBO al cpu_map */
         struct dumb_bo_entry *matched_entry = NULL;
         pthread_mutex_lock(&g_dumb_mutex);
         for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
@@ -1917,11 +2755,28 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
                 matched_entry = find_dumb_bo_by_handle_locked(q_h);
             }
         }
+        if (!matched_entry && w > 0 && h > 0) {
+            for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+                if (g_dumb_table[i].bo && g_dumb_table[i].width == w && g_dumb_table[i].height == h) {
+                    matched_entry = &g_dumb_table[i];
+                    break;
+                }
+            }
+        }
         if (matched_entry && fd_idx >= 0 && fcntl(dma_fd, F_GETFD) < 0 && matched_entry->prime_fd >= 0) {
             patched_attribs[fd_idx] = matched_entry->prime_fd;
             dma_fd = matched_entry->prime_fd;
         }
         pthread_mutex_unlock(&g_dumb_mutex);
+
+        /* Intento 1: Llamada directa a libmali con atributos originales de wlroots */
+        if (real_eglCreateImageKHR) {
+            EGLImageKHR direct_img = real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list);
+            if (direct_img) {
+                if (matched_entry) register_egl_image_dumb(direct_img, matched_entry);
+                return direct_img;
+            }
+        }
 
         if (!has_mod && count < 54) {
             patched_attribs[count++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
@@ -1941,12 +2796,19 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
             img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)matched_entry->bo, NULL) : NULL;
         }
 
+        if (img && matched_entry) register_egl_image_dumb(img, matched_entry);
         kmsg_log("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
         return img;
     }
 
     kmsg_log("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
     EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list) : NULL;
+    if (img && target == EGL_NATIVE_PIXMAP_KHR && buffer) {
+        pthread_mutex_lock(&g_dumb_mutex);
+        struct dumb_bo_entry *de = find_dumb_bo_locked((struct gbm_bo *)buffer);
+        pthread_mutex_unlock(&g_dumb_mutex);
+        if (de) register_egl_image_dumb(img, de);
+    }
     kmsg_log("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
     return img;
 }
@@ -2110,6 +2972,37 @@ void *eglGetProcAddress(const char *procname) {
     if (strcmp(procname, "eglDestroyImageKHR") == 0 || strcmp(procname, "eglDestroyImage") == 0) {
         return (void *)eglDestroyImageKHR;
     }
+    if (strcmp(procname, "glEGLImageTargetRenderbufferStorageOES") == 0) {
+        return (void *)glEGLImageTargetRenderbufferStorageOES;
+    }
+    if (strcmp(procname, "glEGLImageTargetTexture2DOES") == 0) {
+        return (void *)glEGLImageTargetTexture2DOES;
+    }
+    if (strcmp(procname, "glBindTexture") == 0) return (void *)glBindTexture;
+    if (strcmp(procname, "glDeleteTextures") == 0) return (void *)glDeleteTextures;
+    if (strcmp(procname, "glPixelStorei") == 0) return (void *)glPixelStorei;
+    if (strcmp(procname, "glTexImage2D") == 0) return (void *)glTexImage2D;
+    if (strcmp(procname, "glTexSubImage2D") == 0) return (void *)glTexSubImage2D;
+    if (strcmp(procname, "glBindRenderbuffer") == 0) return (void *)glBindRenderbuffer;
+    if (strcmp(procname, "glBindFramebuffer") == 0) return (void *)glBindFramebuffer;
+    if (strcmp(procname, "glFramebufferRenderbuffer") == 0) return (void *)glFramebufferRenderbuffer;
+    if (strcmp(procname, "glFramebufferTexture2D") == 0) return (void *)glFramebufferTexture2D;
+    if (strcmp(procname, "glViewport") == 0) return (void *)glViewport;
+    if (strcmp(procname, "glScissor") == 0) return (void *)glScissor;
+    if (strcmp(procname, "glEnable") == 0) return (void *)glEnable;
+    if (strcmp(procname, "glDisable") == 0) return (void *)glDisable;
+    if (strcmp(procname, "glShaderSource") == 0) return (void *)glShaderSource;
+    if (strcmp(procname, "glLinkProgram") == 0) return (void *)glLinkProgram;
+    if (strcmp(procname, "glGetUniformLocation") == 0) return (void *)glGetUniformLocation;
+    if (strcmp(procname, "glUseProgram") == 0) return (void *)glUseProgram;
+    if (strcmp(procname, "glUniformMatrix3fv") == 0) return (void *)glUniformMatrix3fv;
+    if (strcmp(procname, "glUniform4f") == 0) return (void *)glUniform4f;
+    if (strcmp(procname, "glUniform1f") == 0) return (void *)glUniform1f;
+    if (strcmp(procname, "glVertexAttribPointer") == 0) return (void *)glVertexAttribPointer;
+    if (strcmp(procname, "glReadPixels") == 0) return (void *)glReadPixels;
+    if (strcmp(procname, "glClearColor") == 0) return (void *)glClearColor;
+    if (strcmp(procname, "glGetError") == 0) return (void *)glGetError;
+    if (strcmp(procname, "eglQueryString") == 0) return (void *)eglQueryString;
 
     if (!real_eglGetProcAddress) {
         void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -2187,25 +3080,7 @@ drmModeConnectorPtr drmModeGetConnectorCurrent(int fd, uint32_t connectorId) {
 
 static int safe_drm_set_master(int fd) {
     if (fd < 0) return 0;
-    static int s_master_done = 0;
-    if (s_master_done) return 0;
-    static int (*real_drmSetMaster)(int) = NULL;
-    if (!real_drmSetMaster) {
-        real_drmSetMaster = dlsym(RTLD_DEFAULT, "drmSetMaster");
-        if (!real_drmSetMaster) {
-            void *ldrm = dlopen("/usr/lib/libdrm.so.2", RTLD_LAZY | RTLD_GLOBAL);
-            if (ldrm) real_drmSetMaster = dlsym(ldrm, "drmSetMaster");
-        }
-    }
-    int ret = -1;
-    if (real_drmSetMaster) {
-        ret = real_drmSetMaster(fd);
-    }
-    if (ret != 0) {
-        ret = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
-    }
-    if (ret == 0) s_master_done = 1;
-    return ret;
+    return ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
 }
 
 int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,

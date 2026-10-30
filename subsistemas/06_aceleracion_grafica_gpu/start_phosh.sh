@@ -35,6 +35,13 @@ if ! pgrep -f wdt_pet >/dev/null 2>&1; then
     [ -x /sysroot/bin/wdt_pet ] && /sysroot/bin/wdt_pet >/dev/null 2>&1 &
 fi
 
+# 3.1 Cargar cadena de GPU Mali si /dev/mali0 no está presente
+if [ ! -e /dev/mali0 ] && [ ! -e /sysroot/dev/mali0 ]; then
+    [ -x /sysroot/usr/bin/load_mali_chain.sh ] && /sysroot/usr/bin/load_mali_chain.sh || true
+    [ -x /usr/bin/load_mali_chain.sh ] && /usr/bin/load_mali_chain.sh || true
+fi
+chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
+
 # 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
 mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
 if ! grep -q ' /dev/shm ' /proc/mounts 2>/dev/null; then
@@ -149,12 +156,12 @@ export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# 10. Renderizador Pixman sobre DRM Dumb Buffers (Software CPU Octa-Core)
+# 10. Renderizador Estable (Pixman + Blindaje DRM en libgpu_interface_driver)
 export WLR_RENDERER=pixman
 export WLR_RENDERER_ALLOW_SOFTWARE=1
 export WLR_BACKENDS=drm,libinput
 export WLR_DRM_DEVICES=/dev/dri/card0
-export WLR_LIBINPUT_NO_DEVICES=1
+# export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_DRM_NO_ATOMIC=1
@@ -175,7 +182,7 @@ export MOZ_ENABLE_WAYLAND=1
 
 # 12. D-Bus de sistema
 mkdir -p /run/dbus /var/run/dbus
-if [ ! -e /run/dbus/system_bus_socket ]; then
+if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
     dbus-daemon --system --fork 2>/dev/null || true
 fi
 
@@ -185,14 +192,14 @@ gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null |
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 
-# 13. Cadena LD_PRELOAD limpia (solo libseat_direct y jemalloc)
-PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so"
+# 13. Cadena LD_PRELOAD para Aceleración GPU Mali Valhall
+PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.6 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so /usr/lib/libmali-bifrost-patched.so"
 unset LD_PRELOAD
 
-# 14. Supervisor de Phoc + Phosh
-echo "[supervisor] Iniciando Phoc con Pixman + Phosh en pantalla DSI-1..." >> /var/log/phosh_supervisor.log
+# 14. Supervisor de Phoc + Phosh Acelerado por Hardware
+echo "[supervisor] Iniciando Phoc con Mali GPU + Phosh en pantalla DSI-1..." >> /var/log/phosh_supervisor.log
 rm -f $XDG_RUNTIME_DIR/wayland-* 2>/dev/null || true
 echo 15 > /run/dummy_brightness 2>/dev/null || true
 echo 15 > /sysroot/run/dummy_brightness 2>/dev/null || true
 
-exec dbus-run-session -- env LD_PRELOAD="$PHOC_PRELOAD" /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/bin/phosh_wrapper.sh" >> /var/log/phosh_pixman.log 2>&1
+exec dbus-run-session -- env LD_PRELOAD="$PHOC_PRELOAD" /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/bin/phosh_wrapper.sh" >> /var/log/phosh_gpu.log 2>&1
