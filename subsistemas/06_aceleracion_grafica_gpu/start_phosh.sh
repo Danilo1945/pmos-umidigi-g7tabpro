@@ -35,8 +35,8 @@ if ! pgrep -f wdt_pet >/dev/null 2>&1; then
     [ -x /sysroot/bin/wdt_pet ] && /sysroot/bin/wdt_pet >/dev/null 2>&1 &
 fi
 
-# 3.1 Cargar cadena de GPU Mali si /dev/mali0 no está presente
-if [ ! -e /dev/mali0 ] && [ ! -e /sysroot/dev/mali0 ]; then
+# 3.1 Cargar cadena de GPU Mali si el módulo de kernel mali_kbase no está cargado
+if ! grep -q "mali_kbase" /proc/modules 2>/dev/null; then
     [ -x /sysroot/usr/bin/load_mali_chain.sh ] && /sysroot/usr/bin/load_mali_chain.sh || true
     [ -x /usr/bin/load_mali_chain.sh ] && /usr/bin/load_mali_chain.sh || true
 fi
@@ -65,7 +65,7 @@ xwayland=false
 [output:DSI-1]
 enable=true
 scale=1.0
-rotate=180
+rotate=normal
 mode=1200x1920@60.000Hz
 
 [output:Writeback-1]
@@ -156,9 +156,9 @@ export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# 10. Renderizador Estable (Pixman + Blindaje DRM en libgpu_interface_driver)
-export WLR_RENDERER=pixman
-export WLR_RENDERER_ALLOW_SOFTWARE=1
+# 10. Renderizador Estable Acelerado por GPU GLES2 (ARM Mali-G57)
+export WLR_RENDERER=gles2
+export WLR_RENDERER_ALLOW_SOFTWARE=0
 export WLR_BACKENDS=drm,libinput
 export WLR_DRM_DEVICES=/dev/dri/card0
 # export WLR_LIBINPUT_NO_DEVICES=1
@@ -193,7 +193,7 @@ gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 
 # 13. Cadena LD_PRELOAD para Aceleración GPU Mali Valhall
-PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libstdc++.so.6 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so /usr/lib/libmali-bifrost-patched.so"
+PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so"
 unset LD_PRELOAD
 
 # 14. Supervisor de Phoc + Phosh Acelerado por Hardware
