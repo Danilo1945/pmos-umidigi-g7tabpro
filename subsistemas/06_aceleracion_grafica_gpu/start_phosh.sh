@@ -42,6 +42,12 @@ if ! grep -q "mali_kbase" /proc/modules 2>/dev/null; then
 fi
 chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
 
+# 3.2 Cargar driver táctil Chipone TDDI parcheado si no está cargado
+if ! grep -q "tddi_9551" /proc/modules 2>/dev/null; then
+    [ -f /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko ] && insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko 2>/dev/null || true
+    [ -f /sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko ] && insmod /sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko 2>/dev/null || true
+fi
+
 # 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
 mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
 if ! grep -q ' /dev/shm ' /proc/mounts 2>/dev/null; then
@@ -52,9 +58,37 @@ if ! grep -q ' /sysroot/dev/shm ' /proc/mounts 2>/dev/null; then
 fi
 chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 
-# 5. Permisos de dispositivos
+# 5. Permisos y metadatos de dispositivos
 chmod 666 /dev/dri/* /sysroot/dev/dri/* 2>/dev/null || true
 chmod 666 /dev/input/* /sysroot/dev/input/* 2>/dev/null || true
+
+mkdir -p /run/udev/data /sysroot/run/udev/data 2>/dev/null || true
+cat << 'UDEVEOF' > /run/udev/data/c13:66
+I:3249649026
+E:DEVNAME=/dev/input/event2
+E:DEVPATH=/devices/platform/soc/11e00000.i2c/i2c-0/0-0048/input/input2/event2
+E:MAJOR=13
+E:MINOR=66
+E:SUBSYSTEM=input
+E:ID_INPUT=1
+E:ID_INPUT_TOUCHSCREEN=1
+E:ID_BUS=i2c
+E:LIBINPUT_CALIBRATION_MATRIX=1 0 0 0 1 0
+UDEVEOF
+cp -f /run/udev/data/c13:66 /sysroot/run/udev/data/c13:66 2>/dev/null || true
+
+cat << 'UDEVEOF' > /run/udev/data/c13:67
+I:3249649027
+E:DEVNAME=/dev/input/event3
+E:DEVPATH=/devices/platform/soc/11e00000.i2c/i2c-0/0-0048/input/input3/event3
+E:MAJOR=13
+E:MINOR=67
+E:SUBSYSTEM=input
+E:ID_INPUT=1
+E:ID_INPUT_TABLET=1
+E:ID_BUS=i2c
+UDEVEOF
+cp -f /run/udev/data/c13:67 /sysroot/run/udev/data/c13:67 2>/dev/null || true
 
 # 6. Configuración de phoc.ini (rotación 180° y deshabilitar Writeback)
 mkdir -p /etc /sysroot/etc
@@ -168,7 +202,7 @@ export WLR_DRM_NO_ATOMIC=1
 
 # Asegurar que udev esté activo para DRM/KMS y dispositivos de entrada
 if ! pgrep -x udevd >/dev/null 2>&1; then
-    /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
+    /usr/bin/udevd --daemon 2>/dev/null || /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
 fi
 
 # 11. Variables de integración para clientes Wayland
