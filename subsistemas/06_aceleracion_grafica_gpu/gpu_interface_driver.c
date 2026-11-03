@@ -2707,6 +2707,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
     if (rx0 >= rx1 || ry0 >= ry1) return;
 
+    static int s_flip_180 = -1;
+    if (s_flip_180 < 0) {
+        const char *e = getenv("GPU_FLIP_180");
+        s_flip_180 = (e && atoi(e) == 0) ? 0 : 1;
+    }
+
     if (sp->is_tex == 0) {
         /* Quad de color sólido optimizado */
         uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
@@ -2718,7 +2724,9 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             uint32_t opaque_col = col | 0xFF000000u;
             uint32x4_t vcol = vdupq_n_u32(opaque_col);
             for (int py = ry0; py < ry1; py++) {
-                uint32_t *dst_row = fb_px + py * fb_stride_px + rx0;
+                int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
+                int out_x0 = s_flip_180 ? (fb_w - rx1) : rx0;
+                uint32_t *dst_row = fb_px + out_y * fb_stride_px + out_x0;
                 int x = 0;
                 for (; x <= count - 4; x += 4) {
                     vst1q_u32(dst_row + x, vcol);
@@ -2729,9 +2737,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             }
         } else {
             for (int py = ry0; py < ry1; py++) {
-                uint32_t *dst_row = fb_px + py * fb_stride_px;
+                int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
+                uint32_t *dst_row = fb_px + out_y * fb_stride_px;
                 for (int px = rx0; px < rx1; px++) {
-                    dst_row[px] = blend_premult_argb(col, dst_row[px]);
+                    int out_x = s_flip_180 ? (fb_w - 1 - px) : px;
+                    dst_row[out_x] = blend_premult_argb(col, dst_row[out_x]);
                 }
             }
         }
@@ -2778,12 +2788,16 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int rev_x = (u_left > u_right);
         int rev_y = (v_top > v_bottom);
 
+        int eff_rev_x = s_flip_180 ? (rev_x ^ 1) : rev_x;
+        int eff_rev_y = s_flip_180 ? (rev_y ^ 1) : rev_y;
+
         for (int py = ry0; py < ry1; py++) {
             int row_rel = py - base_y;
             if (row_rel < 0 || row_rel >= th) continue;
-            int ty = rev_y ? (th - 1 - row_rel) : row_rel;
+            int ty = eff_rev_y ? (th - 1 - row_rel) : row_rel;
             const uint32_t *src_row = st->pixels + ty * tw;
-            uint32_t *dst_row = fb_px + py * fb_stride_px;
+            int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
+            uint32_t *dst_row = fb_px + out_y * fb_stride_px;
 
             int tx_start = rx0 - base_x;
             int count = rx1 - rx0;
@@ -2795,25 +2809,27 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             if (tx_start + count > tw) count = tw - tx_start;
             if (count <= 0) continue;
 
-            if (!rev_x) {
+            int out_x0 = s_flip_180 ? (fb_w - rx1) : rx0;
+
+            if (!eff_rev_x) {
                 /* Dirección X normal */
                 if (is_opaque_shader && alpha_scale >= 255u) {
                     /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
-                    memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
+                    memcpy(dst_row + out_x0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
                 } else if (alpha_scale >= 255u) {
                     /* Vectorizado NEON a 4 píxeles por ciclo */
-                    blend_row_neon(dst_row + rx0, src_row + tx_start, count);
+                    blend_row_neon(dst_row + out_x0, src_row + tx_start, count);
                 } else {
                     /* Vectorizado NEON con modulación de opacidad */
-                    blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
+                    blend_row_neon_alpha(dst_row + out_x0, src_row + tx_start, count, alpha_scale);
                 }
             } else {
                 /* Dirección X invertida (rotación 180° / flip horizontal) */
                 const uint32_t *src_end = src_row + (tw - tx_start);
                 if (is_opaque_shader && alpha_scale >= 255u) {
-                    copy_row_neon_rev(dst_row + rx0, src_end, count);
+                    copy_row_neon_rev(dst_row + out_x0, src_end, count);
                 } else {
-                    blend_row_neon_rev(dst_row + rx0, src_end, count);
+                    blend_row_neon_rev(dst_row + out_x0, src_end, count);
                 }
             }
         }
@@ -2832,7 +2848,8 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int ty = (int)(tv * (float)th);
         if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
         const uint32_t *src_row = st->pixels + ty * tw;
-        uint32_t *dst_row = fb_px + py * fb_stride_px;
+        int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
+        uint32_t *dst_row = fb_px + out_y * fb_stride_px;
 
         float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
         int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
@@ -2843,8 +2860,9 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
 
             uint32_t spx = src_row[tx];
+            int out_x = s_flip_180 ? (fb_w - 1 - px) : px;
             if (is_opaque_shader && alpha_scale >= 255u) {
-                dst_row[px] = spx | 0xFF000000u;
+                dst_row[out_x] = spx | 0xFF000000u;
             } else {
                 if (sp->is_tex == 2) spx |= 0xFF000000u;
                 if (alpha_scale < 255u) {
@@ -2854,7 +2872,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
                     spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
                 }
-                dst_row[px] = blend_premult_argb(spx, dst_row[px]);
+                dst_row[out_x] = blend_premult_argb(spx, dst_row[out_x]);
             }
         }
     }
