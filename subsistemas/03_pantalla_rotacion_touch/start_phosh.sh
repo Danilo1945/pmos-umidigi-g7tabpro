@@ -73,7 +73,7 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TOUCHSCREEN=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 -1 1
+E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 1 0
 UDEVEOF
 cp -f /run/udev/data/c13:66 /sysroot/run/udev/data/c13:66 2>/dev/null || true
 
@@ -87,7 +87,7 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TABLET=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 -1 1
+E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 1 0
 UDEVEOF
 cp -f /run/udev/data/c13:67 /sysroot/run/udev/data/c13:67 2>/dev/null || true
 
