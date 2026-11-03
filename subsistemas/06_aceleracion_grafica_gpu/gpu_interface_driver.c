@@ -3423,20 +3423,6 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
     int ret = real_drmModePageFlip ? real_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data) : -1;
     kmsg_log("[GPU-KMS] <<< drmModePageFlip RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
 
-    /* Sincronización entre dumb buffers para coherencia perfecta en double buffering */
-    pthread_mutex_lock(&g_dumb_mutex);
-    struct dumb_bo_entry *d0 = &g_dumb_table[0];
-    struct dumb_bo_entry *d1 = &g_dumb_table[1];
-    if (d0->bo && d1->bo && d0->cpu_map && d1->cpu_map && d0->size == d1->size && d0->size > 0) {
-        struct dumb_bo_entry *active = get_active_fbo_dumb();
-        if (active == d0) {
-            memcpy(d1->cpu_map, d0->cpu_map, d0->size);
-        } else if (active == d1) {
-            memcpy(d0->cpu_map, d1->cpu_map, d1->size);
-        }
-    }
-    pthread_mutex_unlock(&g_dumb_mutex);
-
     return ret;
 }
 
