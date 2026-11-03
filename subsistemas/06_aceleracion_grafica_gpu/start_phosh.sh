@@ -62,7 +62,7 @@ chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 chmod 666 /dev/dri/* /sysroot/dev/dri/* 2>/dev/null || true
 chmod 666 /dev/input/* /sysroot/dev/input/* 2>/dev/null || true
 
-mkdir -p /run/udev/data /sysroot/run/udev/data 2>/dev/null || true
+mkdir -p /run/udev/data /sysroot/run/udev/data /etc/udev/rules.d /sysroot/etc/udev/rules.d 2>/dev/null || true
 cat << 'UDEVEOF' > /run/udev/data/c13:66
 I:3249649026
 E:DEVNAME=/dev/input/event2
@@ -73,7 +73,7 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TOUCHSCREEN=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 1 0
+E:LIBINPUT_CALIBRATION_MATRIX=1 0 0 0 1 0
 UDEVEOF
 cp -f /run/udev/data/c13:66 /sysroot/run/udev/data/c13:66 2>/dev/null || true
 
@@ -87,9 +87,15 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TABLET=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 1 0
+E:LIBINPUT_CALIBRATION_MATRIX=1 0 0 0 1 0
 UDEVEOF
 cp -f /run/udev/data/c13:67 /sysroot/run/udev/data/c13:67 2>/dev/null || true
+
+cat << 'UDEVEOF' > /etc/udev/rules.d/99-touchscreen.rules
+ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone_tddi", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 1 0", ENV{ID_INPUT_TOUCHSCREEN}="1"
+ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone-tddi,pen", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 1 0", ENV{ID_INPUT_TABLET}="1"
+UDEVEOF
+cp -f /etc/udev/rules.d/99-touchscreen.rules /sysroot/etc/udev/rules.d/99-touchscreen.rules 2>/dev/null || true
 
 # 6. Configuración de phoc.ini (rotación 180° y deshabilitar Writeback)
 mkdir -p /etc /sysroot/etc
@@ -100,7 +106,8 @@ xwayland=false
 [output:DSI-1]
 enable=true
 scale=1.0
-rotate=normal
+rotate=180
+transform=180
 mode=1200x1920@60.000Hz
 
 [output:Writeback-1]
