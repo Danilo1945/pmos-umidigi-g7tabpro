@@ -11,6 +11,15 @@ mkdir -p /var/log /sysroot/var/log 2>/dev/null || true
 killall -9 drm_splash panel_pwm_force feedbackd callaudiod dconf-service at-spi-bus-launcher at-spi2-registryd 2>/dev/null || true
 pkill -f "capture_touch" 2>/dev/null || true
 
+# Inhabilitar feedbackd permanentemente para evitar cuelgues de D-Bus en eventos tactiles
+chmod 000 /usr/libexec/feedbackd /sysroot/usr/libexec/feedbackd 2>/dev/null || true
+rm -f /sysroot/usr/share/dbus-1/services/org.sigxcpu.Feedback.service /usr/share/dbus-1/services/org.sigxcpu.Feedback.service 2>/dev/null || true
+
+# Fijar CPU en performance en todos los núcleos
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo performance > "$gov" 2>/dev/null || true
+done
+
 # 2. Blindaje anti-UVLO de brillo LCD permanentemente en 15/255 con escudo de bind-mount
 echo 15 > /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
 mkdir -p /run /sysroot/run 2>/dev/null || true
@@ -43,10 +52,11 @@ if ! grep -q "mali_kbase" /proc/modules 2>/dev/null; then
 fi
 chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
 
-# 3.2 Cargar driver táctil Chipone TDDI parcheado si no está cargado
-if ! grep -q "tddi_9551" /proc/modules 2>/dev/null; then
-    [ -f /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko ] && insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko 2>/dev/null || true
-    [ -f /sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko ] && insmod /sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko 2>/dev/null || true
+# 3.2 Cargar driver táctil Chipone TDDI parcheado
+if [ ! -e /dev/input/event2 ]; then
+    rmmod tddi_9551 2>/dev/null || true
+    insmod /sysroot/lib/modules/tddi_9551_patched.ko 2>/dev/null || insmod /lib/modules/tddi_9551_patched.ko 2>/dev/null || true
+    mdev -s 2>/dev/null || true
 fi
 
 # 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
@@ -98,7 +108,7 @@ ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone-tddi,pen", EN
 UDEVEOF
 cp -f /etc/udev/rules.d/99-touchscreen.rules /sysroot/etc/udev/rules.d/99-touchscreen.rules 2>/dev/null || true
 
-# 6. Configuración de phoc.ini (orientación nativa normal y deshabilitar Writeback)
+# 6. Configuración de phoc.ini (rotación 180° y deshabilitar Writeback)
 mkdir -p /etc /sysroot/etc
 cat << 'PHOCEOF' > /sysroot/etc/phoc.ini
 [core]
@@ -163,11 +173,12 @@ while [ $count -lt 80 ]; do
 done
 sleep 0.5
 
-# 3. Configuraciones de energia seguras para GNOME
+# 3. Configuraciones de energia seguras para GNOME y desactivacion de animaciones para respuesta tactil instantanea
 gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
 
 echo "[wrapper] Lanzando sesion GNOME Mobile Phosh..." >> /var/log/phosh_user.log
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
