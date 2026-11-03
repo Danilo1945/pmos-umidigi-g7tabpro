@@ -2707,12 +2707,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
     if (rx0 >= rx1 || ry0 >= ry1) return;
 
-    static int s_flip_180 = -1;
-    if (s_flip_180 < 0) {
-        const char *e = getenv("GPU_FLIP_180");
-        s_flip_180 = (e && atoi(e) == 0) ? 0 : 1;
-    }
-
     if (sp->is_tex == 0) {
         /* Quad de color sólido optimizado */
         uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
@@ -2724,9 +2718,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             uint32_t opaque_col = col | 0xFF000000u;
             uint32x4_t vcol = vdupq_n_u32(opaque_col);
             for (int py = ry0; py < ry1; py++) {
-                int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
-                int out_x0 = s_flip_180 ? (fb_w - rx1) : rx0;
-                uint32_t *dst_row = fb_px + out_y * fb_stride_px + out_x0;
+                uint32_t *dst_row = fb_px + py * fb_stride_px + rx0;
                 int x = 0;
                 for (; x <= count - 4; x += 4) {
                     vst1q_u32(dst_row + x, vcol);
@@ -2737,11 +2729,9 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             }
         } else {
             for (int py = ry0; py < ry1; py++) {
-                int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
-                uint32_t *dst_row = fb_px + out_y * fb_stride_px;
+                uint32_t *dst_row = fb_px + py * fb_stride_px;
                 for (int px = rx0; px < rx1; px++) {
-                    int out_x = s_flip_180 ? (fb_w - 1 - px) : px;
-                    dst_row[out_x] = blend_premult_argb(col, dst_row[out_x]);
+                    dst_row[px] = blend_premult_argb(col, dst_row[px]);
                 }
             }
         }
@@ -2788,16 +2778,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int rev_x = (u_left > u_right);
         int rev_y = (v_top > v_bottom);
 
-        int eff_rev_x = s_flip_180 ? (rev_x ^ 1) : rev_x;
-        int eff_rev_y = s_flip_180 ? (rev_y ^ 1) : rev_y;
-
         for (int py = ry0; py < ry1; py++) {
             int row_rel = py - base_y;
             if (row_rel < 0 || row_rel >= th) continue;
-            int ty = eff_rev_y ? (th - 1 - row_rel) : row_rel;
+            int ty = rev_y ? (th - 1 - row_rel) : row_rel;
             const uint32_t *src_row = st->pixels + ty * tw;
-            int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
-            uint32_t *dst_row = fb_px + out_y * fb_stride_px;
+            uint32_t *dst_row = fb_px + py * fb_stride_px;
 
             int tx_start = rx0 - base_x;
             int count = rx1 - rx0;
@@ -2809,27 +2795,25 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             if (tx_start + count > tw) count = tw - tx_start;
             if (count <= 0) continue;
 
-            int out_x0 = s_flip_180 ? (fb_w - rx1) : rx0;
-
-            if (!eff_rev_x) {
+            if (!rev_x) {
                 /* Dirección X normal */
                 if (is_opaque_shader && alpha_scale >= 255u) {
                     /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
-                    memcpy(dst_row + out_x0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
+                    memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
                 } else if (alpha_scale >= 255u) {
                     /* Vectorizado NEON a 4 píxeles por ciclo */
-                    blend_row_neon(dst_row + out_x0, src_row + tx_start, count);
+                    blend_row_neon(dst_row + rx0, src_row + tx_start, count);
                 } else {
                     /* Vectorizado NEON con modulación de opacidad */
-                    blend_row_neon_alpha(dst_row + out_x0, src_row + tx_start, count, alpha_scale);
+                    blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
                 }
             } else {
                 /* Dirección X invertida (rotación 180° / flip horizontal) */
                 const uint32_t *src_end = src_row + (tw - tx_start);
                 if (is_opaque_shader && alpha_scale >= 255u) {
-                    copy_row_neon_rev(dst_row + out_x0, src_end, count);
+                    copy_row_neon_rev(dst_row + rx0, src_end, count);
                 } else {
-                    blend_row_neon_rev(dst_row + out_x0, src_end, count);
+                    blend_row_neon_rev(dst_row + rx0, src_end, count);
                 }
             }
         }
@@ -2848,8 +2832,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int ty = (int)(tv * (float)th);
         if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
         const uint32_t *src_row = st->pixels + ty * tw;
-        int out_y = s_flip_180 ? (fb_h - 1 - py) : py;
-        uint32_t *dst_row = fb_px + out_y * fb_stride_px;
+        uint32_t *dst_row = fb_px + py * fb_stride_px;
 
         float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
         int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
@@ -2860,9 +2843,8 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
 
             uint32_t spx = src_row[tx];
-            int out_x = s_flip_180 ? (fb_w - 1 - px) : px;
             if (is_opaque_shader && alpha_scale >= 255u) {
-                dst_row[out_x] = spx | 0xFF000000u;
+                dst_row[px] = spx | 0xFF000000u;
             } else {
                 if (sp->is_tex == 2) spx |= 0xFF000000u;
                 if (alpha_scale < 255u) {
@@ -2872,7 +2854,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
                     spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
                 }
-                dst_row[out_x] = blend_premult_argb(spx, dst_row[out_x]);
+                dst_row[px] = blend_premult_argb(spx, dst_row[px]);
             }
         }
     }
@@ -3422,6 +3404,29 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
     return ret;
 }
 
+static void flip_180_inplace(uint32_t *map, int width, int height, int stride_px) {
+    if (!map || width <= 0 || height <= 0 || stride_px <= 0) return;
+    int half_h = height / 2;
+    for (int y = 0; y < half_h; y++) {
+        uint32_t *row_top = map + y * stride_px;
+        uint32_t *row_bot = map + (height - 1 - y) * stride_px;
+        int left = 0;
+        int right = width - 1;
+        while (left < right) {
+            uint32_t t_l = row_top[left];
+            uint32_t t_r = row_top[right];
+            uint32_t b_l = row_bot[left];
+            uint32_t b_r = row_bot[right];
+            row_top[left]  = b_r;
+            row_top[right] = b_l;
+            row_bot[left]  = t_r;
+            row_bot[right] = t_l;
+            left++;
+            right--;
+        }
+    }
+}
+
 int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
                     uint32_t flags, void *user_data)
 {
@@ -3437,6 +3442,23 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
             if (ldrm) real_drmModePageFlip = dlsym(ldrm, "drmModePageFlip");
         }
     }
+
+    static int s_flip_180_scanout = -1;
+    if (s_flip_180_scanout < 0) {
+        const char *e = getenv("GPU_FLIP_180");
+        s_flip_180_scanout = (e && atoi(e) == 0) ? 0 : 1;
+    }
+
+    if (s_flip_180_scanout) {
+        pthread_mutex_lock(&g_dumb_mutex);
+        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+            if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].width > 0 && g_dumb_table[i].height > 0) {
+                flip_180_inplace((uint32_t *)g_dumb_table[i].cpu_map, (int)g_dumb_table[i].width, (int)g_dumb_table[i].height, (int)(g_dumb_table[i].stride / 4));
+            }
+        }
+        pthread_mutex_unlock(&g_dumb_mutex);
+    }
+
     kmsg_log("[GPU-KMS] >>> drmModePageFlip: fd=%d, crtc=%u, fb=%u, flags=0x%x\n", fd, crtc_id, fb_id, flags);
     int ret = real_drmModePageFlip ? real_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data) : -1;
     kmsg_log("[GPU-KMS] <<< drmModePageFlip RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
