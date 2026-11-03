@@ -97,7 +97,7 @@ ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone-tddi,pen", EN
 UDEVEOF
 cp -f /etc/udev/rules.d/99-touchscreen.rules /sysroot/etc/udev/rules.d/99-touchscreen.rules 2>/dev/null || true
 
-# 6. Configuración de phoc.ini (rotación 180° y deshabilitar Writeback)
+# 6. Configuración de phoc.ini (orientación nativa normal y deshabilitar Writeback)
 mkdir -p /etc /sysroot/etc
 cat << 'PHOCEOF' > /sysroot/etc/phoc.ini
 [core]
@@ -106,8 +106,7 @@ xwayland=false
 [output:DSI-1]
 enable=true
 scale=1.0
-rotate=180
-transform=180
+rotate=normal
 mode=1200x1920@60.000Hz
 
 [output:Writeback-1]
@@ -117,6 +116,11 @@ enable=false
 enable=false
 PHOCEOF
 cp -f /sysroot/etc/phoc.ini /etc/phoc.ini 2>/dev/null || true
+
+# Configuración de alto rendimiento para GPU Mali-G57 (812 MHz - OPP 15)
+if [ -d /proc/gpufreqv2 ]; then
+    echo 15 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
+fi
 
 # 7. Creación de phosh_wrapper.sh con entorno Wayland completo y renderizado por software seguro
 mkdir -p /usr/bin /sysroot/usr/bin

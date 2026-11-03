@@ -2547,6 +2547,88 @@ static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int 
     }
 }
 
+/* Rutina NEON para copia invertida en X a 4 píxeles por ciclo */
+static inline void copy_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int count) {
+    static const uint8_t s_rev_table[16] = {
+        12, 13, 14, 15,
+         8,  9, 10, 11,
+         4,  5,  6,  7,
+         0,  1,  2,  3
+    };
+    uint8x16_t rev_mask = vld1q_u8(s_rev_table);
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
+
+    int i = 0;
+    for (; i <= count - 4; i += 4) {
+        const uint32_t *s = src_end - (i + 4);
+        uint8x16_t v = vld1q_u8((const uint8_t *)s);
+        uint8x16_t r = vqtbl1q_u8(v, rev_mask);
+        r = vorrq_u8(r, v_amask);
+        vst1q_u8((uint8_t *)(dst + i), r);
+    }
+    for (; i < count; i++) {
+        dst[i] = *(src_end - 1 - i) | 0xFF000000u;
+    }
+}
+
+/* Rutina NEON para mezcla premultiplicada invertida en X a 4 píxeles por ciclo */
+static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int count) {
+    static const uint8_t s_rev_table[16] = {
+        12, 13, 14, 15,
+         8,  9, 10, 11,
+         4,  5,  6,  7,
+         0,  1,  2,  3
+    };
+    uint8x16_t rev_mask = vld1q_u8(s_rev_table);
+    static const uint8_t s_dup_alpha_idx[16] = {
+        3, 3, 3, 3,
+        7, 7, 7, 7,
+        11, 11, 11, 11,
+        15, 15, 15, 15
+    };
+    uint8x16_t v_idx = vld1q_u8(s_dup_alpha_idx);
+    uint8x16_t v_255 = vdupq_n_u8(255);
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
+
+    int i = 0;
+    for (; i <= count - 4; i += 4) {
+        const uint32_t *s = src_end - (i + 4);
+        uint8x16_t vraw = vld1q_u8((const uint8_t *)s);
+        uint8x16_t vsrc = vqtbl1q_u8(vraw, rev_mask);
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+
+        uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
+        uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
+
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(vdst), vget_low_u8(vinv_a));
+        uint16x8_t prod_hi = vmull_u8(vget_high_u8(vdst), vget_high_u8(vinv_a));
+
+        uint8x8_t scaled_lo = vshrn_n_u16(prod_lo, 8);
+        uint8x8_t scaled_hi = vshrn_n_u16(prod_hi, 8);
+        uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
+
+        uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
+        res = vorrq_u8(res, v_amask);
+
+        vst1q_u8((uint8_t *)(dst + i), res);
+    }
+    for (; i < count; i++) {
+        dst[i] = blend_premult_argb(*(src_end - 1 - i), dst[i]);
+    }
+}
+
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     (void)mode;
@@ -2685,17 +2767,21 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
     if (alpha_scale > 256u) alpha_scale = 256u;
 
-    /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas) */
+    /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas, rotaciones) */
     int is_1to1 = (fabsf(quad_w - (float)tw) < 1.0f && fabsf(quad_h - (float)th) < 1.0f &&
-                   fabsf(u_right - u_left - 1.0f) < 0.01f && fabsf(v_bottom - v_top - 1.0f) < 0.01f);
+                   fabsf(fabsf(u_right - u_left) - 1.0f) < 0.02f &&
+                   fabsf(fabsf(v_bottom - v_top) - 1.0f) < 0.02f);
 
-    if (is_1to1 && u_left < u_right && v_top < v_bottom) {
+    if (is_1to1) {
         int base_x = (int)(min_sx + 0.5f);
         int base_y = (int)(min_sy + 0.5f);
+        int rev_x = (u_left > u_right);
+        int rev_y = (v_top > v_bottom);
 
         for (int py = ry0; py < ry1; py++) {
-            int ty = py - base_y;
-            if (ty < 0 || ty >= th) continue;
+            int row_rel = py - base_y;
+            if (row_rel < 0 || row_rel >= th) continue;
+            int ty = rev_y ? (th - 1 - row_rel) : row_rel;
             const uint32_t *src_row = st->pixels + ty * tw;
             uint32_t *dst_row = fb_px + py * fb_stride_px;
 
@@ -2709,15 +2795,26 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             if (tx_start + count > tw) count = tw - tx_start;
             if (count <= 0) continue;
 
-            if (is_opaque_shader && alpha_scale >= 255u) {
-                /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
-                memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
-            } else if (alpha_scale >= 255u) {
-                /* Vectorizado NEON a 4 píxeles por ciclo */
-                blend_row_neon(dst_row + rx0, src_row + tx_start, count);
+            if (!rev_x) {
+                /* Dirección X normal */
+                if (is_opaque_shader && alpha_scale >= 255u) {
+                    /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
+                    memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
+                } else if (alpha_scale >= 255u) {
+                    /* Vectorizado NEON a 4 píxeles por ciclo */
+                    blend_row_neon(dst_row + rx0, src_row + tx_start, count);
+                } else {
+                    /* Vectorizado NEON con modulación de opacidad */
+                    blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
+                }
             } else {
-                /* Vectorizado NEON con modulación de opacidad */
-                blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
+                /* Dirección X invertida (rotación 180° / flip horizontal) */
+                const uint32_t *src_end = src_row + (tw - tx_start);
+                if (is_opaque_shader && alpha_scale >= 255u) {
+                    copy_row_neon_rev(dst_row + rx0, src_end, count);
+                } else {
+                    blend_row_neon_rev(dst_row + rx0, src_end, count);
+                }
             }
         }
         return;
