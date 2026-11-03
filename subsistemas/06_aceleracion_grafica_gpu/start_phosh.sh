@@ -8,7 +8,8 @@
 
 # 1. Sanitización de procesos residuales y liberación de DRM Master
 mkdir -p /var/log /sysroot/var/log 2>/dev/null || true
-killall -9 drm_splash panel_pwm_force 2>/dev/null || true
+killall -9 drm_splash panel_pwm_force feedbackd callaudiod dconf-service at-spi-bus-launcher at-spi2-registryd 2>/dev/null || true
+pkill -f "capture_touch" 2>/dev/null || true
 
 # 2. Blindaje anti-UVLO de brillo LCD permanentemente en 15/255 con escudo de bind-mount
 echo 15 > /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
