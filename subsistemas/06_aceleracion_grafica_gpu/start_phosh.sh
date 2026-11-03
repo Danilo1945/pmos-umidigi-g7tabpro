@@ -84,7 +84,7 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TOUCHSCREEN=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=1 0 0 0 1 0
+E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 -1 1
 UDEVEOF
 cp -f /run/udev/data/c13:66 /sysroot/run/udev/data/c13:66 2>/dev/null || true
 
@@ -98,13 +98,13 @@ E:SUBSYSTEM=input
 E:ID_INPUT=1
 E:ID_INPUT_TABLET=1
 E:ID_BUS=i2c
-E:LIBINPUT_CALIBRATION_MATRIX=1 0 0 0 1 0
+E:LIBINPUT_CALIBRATION_MATRIX=-1 0 1 0 -1 1
 UDEVEOF
 cp -f /run/udev/data/c13:67 /sysroot/run/udev/data/c13:67 2>/dev/null || true
 
 cat << 'UDEVEOF' > /etc/udev/rules.d/99-touchscreen.rules
-ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone_tddi", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 1 0", ENV{ID_INPUT_TOUCHSCREEN}="1"
-ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone-tddi,pen", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 1 0", ENV{ID_INPUT_TABLET}="1"
+ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone_tddi", ENV{LIBINPUT_CALIBRATION_MATRIX}="-1 0 1 0 -1 1", ENV{ID_INPUT_TOUCHSCREEN}="1"
+ACTION=="add|change", KERNEL=="event[0-9]*", ATTRS{name}=="chipone-tddi,pen", ENV{LIBINPUT_CALIBRATION_MATRIX}="-1 0 1 0 -1 1", ENV{ID_INPUT_TABLET}="1"
 UDEVEOF
 cp -f /etc/udev/rules.d/99-touchscreen.rules /sysroot/etc/udev/rules.d/99-touchscreen.rules 2>/dev/null || true
 
@@ -117,7 +117,7 @@ xwayland=false
 [output:DSI-1]
 enable=true
 scale=1.0
-rotate=normal
+rotate=180
 mode=1200x1920@60.000Hz
 
 [output:Writeback-1]
