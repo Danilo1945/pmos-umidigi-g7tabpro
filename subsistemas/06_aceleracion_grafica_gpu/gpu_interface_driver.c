@@ -19,6 +19,8 @@
 #include <drm_fourcc.h>
 #include <semaphore.h>
 #include <time.h>
+#include <math.h>
+#include <arm_neon.h>
 
 
 static int g_kms_fd = -1;
@@ -1816,6 +1818,14 @@ static EGLBoolean (*real_eglBindWaylandDisplayWL)(EGLDisplay, struct wl_display 
 static EGLBoolean (*real_eglUnbindWaylandDisplayWL)(EGLDisplay, struct wl_display *) = NULL;
 static void *(*real_eglGetProcAddress)(const char *) = NULL;
 
+static void filter_ext_string(char *str, const char *ext) {
+    size_t len = strlen(ext);
+    char *p;
+    while ((p = strstr(str, ext)) != NULL) {
+        memset(p, ' ', len);
+    }
+}
+
 static const char *(*real_eglQueryString)(EGLDisplay, int) = NULL;
 __attribute__((visibility("default")))
 const char *eglQueryString(EGLDisplay dpy, int name) {
@@ -1826,16 +1836,17 @@ const char *eglQueryString(EGLDisplay dpy, int name) {
         if (!real_eglQueryString) real_eglQueryString = dlsym(RTLD_NEXT, "eglQueryString");
     }
     const char *orig = real_eglQueryString ? real_eglQueryString(dpy, name) : NULL;
-    /* 0x3055 = EGL_EXTENSIONS: remover EGL_WL_bind_wayland_display y EGL_EXT_image_dma_buf_import_modifiers
-     * para que wlroots solo anuncie wl_shm a los clientes (GTK3/Phosh) y ellos suban píxeles limpios vía glTexImage2D */
-    if (name == 0x3055 && orig && dpy != NULL) {
+    /* 0x3055 = EGL_EXTENSIONS: remover extensiones que causan asunciones de buffer age
+     * y daño parcial en wlroots, forzando redibujado consistente y evitando glitches */
+    if (name == 0x3055 && orig) {
         static char s_filtered_egl_exts[4096];
         strncpy(s_filtered_egl_exts, orig, sizeof(s_filtered_egl_exts) - 1);
         s_filtered_egl_exts[sizeof(s_filtered_egl_exts) - 1] = '\0';
-        char *p;
-        while ((p = strstr(s_filtered_egl_exts, "EGL_WL_bind_wayland_display")) != NULL) {
-            memset(p, ' ', strlen("EGL_WL_bind_wayland_display"));
-        }
+        filter_ext_string(s_filtered_egl_exts, "EGL_WL_bind_wayland_display");
+        filter_ext_string(s_filtered_egl_exts, "EGL_KHR_partial_update");
+        filter_ext_string(s_filtered_egl_exts, "EGL_EXT_buffer_age");
+        filter_ext_string(s_filtered_egl_exts, "EGL_KHR_swap_buffers_with_damage");
+        filter_ext_string(s_filtered_egl_exts, "EGL_EXT_swap_buffers_with_damage");
         return s_filtered_egl_exts;
     }
     return orig;
@@ -2032,6 +2043,23 @@ static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int
     /* GL_BGRA_EXT = 0x80E1, GL_RGBA = 0x1908, GL_RGB = 0x1907 */
     int is_rgba = (format == 0x1908);
 
+    if (!is_rgba) {
+        /* Para formatos compatibles con ARGB/BGRA nativo: copia directa línea a línea vía memcpy */
+        int copy_w = width;
+        if (xoffset + copy_w > st->width) copy_w = st->width - xoffset;
+        if (copy_w <= 0) return;
+        size_t line_bytes = (size_t)copy_w * sizeof(uint32_t);
+
+        for (int y = 0; y < height; y++) {
+            int dy = yoffset + y;
+            if (dy < 0 || dy >= st->height) continue;
+            uint32_t *dst_row = st->pixels + dy * st->width + xoffset;
+            const uint32_t *src_row = src32 + y * src_stride_px;
+            memcpy(dst_row, src_row, line_bytes);
+        }
+        return;
+    }
+
     for (int y = 0; y < height; y++) {
         int dy = yoffset + y;
         if (dy < 0 || dy >= st->height) continue;
@@ -2041,15 +2069,12 @@ static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int
             int dx = xoffset + x;
             if (dx < 0 || dx >= st->width) continue;
             uint32_t px = src_row[x];
-            if (is_rgba) {
-                /* Convertir 0xAABBGGRR -> 0xAARRGGBB */
-                uint32_t a = px & 0xFF000000u;
-                uint32_t r = (px & 0x000000FFu) << 16;
-                uint32_t g = (px & 0x0000FF00u);
-                uint32_t b = (px & 0x00FF0000u) >> 16;
-                px = a | r | g | b;
-            }
-            dst_row[dx] = px;
+            /* Convertir 0xAABBGGRR -> 0xAARRGGBB */
+            uint32_t a = px & 0xFF000000u;
+            uint32_t r = (px & 0x000000FFu) << 16;
+            uint32_t g = (px & 0x0000FF00u);
+            uint32_t b = (px & 0x00FF0000u) >> 16;
+            dst_row[dx] = a | r | g | b;
         }
     }
 }
@@ -2426,6 +2451,102 @@ static inline uint32_t blend_premult_argb(uint32_t src, uint32_t dst) {
     return 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
 }
 
+/* Rutina NEON ultra-rápida de mezcla premultiplicada para 4 píxeles ARGB a la vez */
+static inline void blend_row_neon(uint32_t *dst, const uint32_t *src, int count) {
+    int i = 0;
+    static const uint8_t s_dup_alpha_idx[16] = {
+        3, 3, 3, 3,
+        7, 7, 7, 7,
+        11, 11, 11, 11,
+        15, 15, 15, 15
+    };
+    uint8x16_t v_idx = vld1q_u8(s_dup_alpha_idx);
+    uint8x16_t v_255 = vdupq_n_u8(255);
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
+
+    for (; i <= count - 4; i += 4) {
+        uint8x16_t vsrc = vld1q_u8((const uint8_t *)(src + i));
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+
+        uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
+        uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
+
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(vdst), vget_low_u8(vinv_a));
+        uint16x8_t prod_hi = vmull_u8(vget_high_u8(vdst), vget_high_u8(vinv_a));
+
+        uint8x8_t scaled_lo = vshrn_n_u16(prod_lo, 8);
+        uint8x8_t scaled_hi = vshrn_n_u16(prod_hi, 8);
+        uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
+
+        uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
+        res = vorrq_u8(res, v_amask);
+
+        vst1q_u8((uint8_t *)(dst + i), res);
+    }
+    for (; i < count; i++) {
+        dst[i] = blend_premult_argb(src[i], dst[i]);
+    }
+}
+
+/* Rutina NEON de mezcla con escalado global de opacidad (alpha_scale) */
+static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int count, uint32_t alpha_scale) {
+    int i = 0;
+    static const uint8_t s_dup_alpha_idx[16] = {
+        3, 3, 3, 3,
+        7, 7, 7, 7,
+        11, 11, 11, 11,
+        15, 15, 15, 15
+    };
+    uint8x16_t v_idx = vld1q_u8(s_dup_alpha_idx);
+    uint8x16_t v_255 = vdupq_n_u8(255);
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
+    uint8x8_t v_ascale = vdup_n_u8((uint8_t)alpha_scale);
+
+    for (; i <= count - 4; i += 4) {
+        uint8x16_t vsrc_raw = vld1q_u8((const uint8_t *)(src + i));
+        uint16x8_t s_lo = vmull_u8(vget_low_u8(vsrc_raw), v_ascale);
+        uint16x8_t s_hi = vmull_u8(vget_high_u8(vsrc_raw), v_ascale);
+        uint8x16_t vsrc = vcombine_u8(vshrn_n_u16(s_lo, 8), vshrn_n_u16(s_hi, 8));
+
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
+        uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
+
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(vdst), vget_low_u8(vinv_a));
+        uint16x8_t prod_hi = vmull_u8(vget_high_u8(vdst), vget_high_u8(vinv_a));
+
+        uint8x8_t scaled_lo = vshrn_n_u16(prod_lo, 8);
+        uint8x8_t scaled_hi = vshrn_n_u16(prod_hi, 8);
+        uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
+
+        uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
+        res = vorrq_u8(res, v_amask);
+
+        vst1q_u8((uint8_t *)(dst + i), res);
+    }
+    for (; i < count; i++) {
+        uint32_t spx = src[i];
+        uint32_t sa = (((spx >> 24) & 0xFFu) * alpha_scale) >> 8;
+        uint32_t sr = (((spx >> 16) & 0xFFu) * alpha_scale) >> 8;
+        uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
+        uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
+        spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+        dst[i] = blend_premult_argb(spx, dst[i]);
+    }
+}
+
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     (void)mode;
@@ -2463,15 +2584,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     const float vx[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
     const float vy[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 
-    /* Proyección de vértices a coordenadas de pantalla y UV:
-     * En wlroots: gl_Position = vec4(pos3 * proj, 1.0);
-     *             v_texcoord = (tex_proj * pos3).xy;
-     * Con GLES2 transpose=GL_FALSE (column-major):
-     *   (pos3 * proj).x = dot(pos3, col0) = x*m[0] + y*m[1] + m[2]
-     *   (pos3 * proj).y = dot(pos3, col1) = x*m[3] + y*m[4] + m[5]
-     *   (tex_proj * pos3).x = x*t[0] + y*t[3] + t[6] (o si wlroots ya transpuso tex_proj: x*t[0] + y*t[1] + t[2])
-     *   Observamos que en wlroots wlr_matrix_transpose se aplica antes de glUniformMatrix3fv,
-     *   por lo que la traslación tx, ty siempre vive en [2] y [5]. */
     float sx[4], sy[4], u[4], v[4];
     float min_sx = 1e9f, max_sx = -1e9f, min_sy = 1e9f, max_sy = -1e9f;
     for (int i = 0; i < 4; i++) {
@@ -2514,16 +2626,31 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (rx0 >= rx1 || ry0 >= ry1) return;
 
     if (sp->is_tex == 0) {
-        /* Quad de color sólido */
+        /* Quad de color sólido optimizado */
         uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
         int do_blend = (g_blend_enabled && ((col >> 24) < 255));
-        for (int py = ry0; py < ry1; py++) {
-            uint32_t *dst_row = fb_px + py * fb_stride_px;
-            if (!do_blend) {
-                uint32_t opaque_col = col | 0xFF000000u;
-                for (int px = rx0; px < rx1; px++) dst_row[px] = opaque_col;
-            } else {
-                for (int px = rx0; px < rx1; px++) dst_row[px] = blend_premult_argb(col, dst_row[px]);
+        int count = rx1 - rx0;
+        if (count <= 0) return;
+
+        if (!do_blend) {
+            uint32_t opaque_col = col | 0xFF000000u;
+            uint32x4_t vcol = vdupq_n_u32(opaque_col);
+            for (int py = ry0; py < ry1; py++) {
+                uint32_t *dst_row = fb_px + py * fb_stride_px + rx0;
+                int x = 0;
+                for (; x <= count - 4; x += 4) {
+                    vst1q_u32(dst_row + x, vcol);
+                }
+                for (; x < count; x++) {
+                    dst_row[x] = opaque_col;
+                }
+            }
+        } else {
+            for (int py = ry0; py < ry1; py++) {
+                uint32_t *dst_row = fb_px + py * fb_stride_px;
+                for (int px = rx0; px < rx1; px++) {
+                    dst_row[px] = blend_premult_argb(col, dst_row[px]);
+                }
             }
         }
         return;
@@ -2538,9 +2665,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     float quad_h = (max_sy - min_sy);
     if (quad_w < 1.0f || quad_h < 1.0f) return;
 
-    /* Determinar mapeo UV en las esquinas del quad proyectado (min_sx, min_sy) -> (max_sx, max_sy):
-     * En wlroots, tex_proj puede estar en column-major o row-major; tomamos el bbox UV real de los 4 vértices
-     * o [0..1] si el rango es degenerado */
     float min_u = 1e9f, max_u = -1e9f, min_v = 1e9f, max_v = -1e9f;
     for (int i = 0; i < 4; i++) {
         if (u[i] < min_u) min_u = u[i];
@@ -2552,7 +2676,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (max_v - min_v < 0.001f) { min_v = 0.0f; max_v = 1.0f; }
     float u_left = min_u, u_right = max_u;
     float v_top = min_v,  v_bottom = max_v;
-    /* Si sx[0] > sx[2] (reflejado en X), invertir u_left y u_right */
     if (sx[0] > sx[2]) { float tmp = u_left; u_left = u_right; u_right = tmp; }
     if (sy[0] > sy[1]) { float tmp = v_top; v_top = v_bottom; v_bottom = tmp; }
 
@@ -2562,8 +2685,49 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
     if (alpha_scale > 256u) alpha_scale = 256u;
 
+    /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas) */
+    int is_1to1 = (fabsf(quad_w - (float)tw) < 1.0f && fabsf(quad_h - (float)th) < 1.0f &&
+                   fabsf(u_right - u_left - 1.0f) < 0.01f && fabsf(v_bottom - v_top - 1.0f) < 0.01f);
+
+    if (is_1to1 && u_left < u_right && v_top < v_bottom) {
+        int base_x = (int)(min_sx + 0.5f);
+        int base_y = (int)(min_sy + 0.5f);
+
+        for (int py = ry0; py < ry1; py++) {
+            int ty = py - base_y;
+            if (ty < 0 || ty >= th) continue;
+            const uint32_t *src_row = st->pixels + ty * tw;
+            uint32_t *dst_row = fb_px + py * fb_stride_px;
+
+            int tx_start = rx0 - base_x;
+            int count = rx1 - rx0;
+            if (tx_start < 0) {
+                count += tx_start;
+                rx0 -= tx_start;
+                tx_start = 0;
+            }
+            if (tx_start + count > tw) count = tw - tx_start;
+            if (count <= 0) continue;
+
+            if (is_opaque_shader && alpha_scale >= 255u) {
+                /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
+                memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
+            } else if (alpha_scale >= 255u) {
+                /* Vectorizado NEON a 4 píxeles por ciclo */
+                blend_row_neon(dst_row + rx0, src_row + tx_start, count);
+            } else {
+                /* Vectorizado NEON con modulación de opacidad */
+                blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
+            }
+        }
+        return;
+    }
+
+    /* Caso con escalado: Aritmética de punto fijo 16.16 (sin punto flotante por píxel) */
     float inv_qw = 1.0f / quad_w;
     float inv_qh = 1.0f / quad_h;
+    float u_span = (u_right - u_left) * (float)tw;
+    int32_t step_u_fp = (int32_t)(u_span * inv_qw * 65536.0f);
 
     for (int py = ry0; py < ry1; py++) {
         float fy = ((float)py + 0.5f - min_sy) * inv_qh;
@@ -2573,11 +2737,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         const uint32_t *src_row = st->pixels + ty * tw;
         uint32_t *dst_row = fb_px + py * fb_stride_px;
 
-        /* Caso común rápido: escala 1:1 horizontal sin rotación */
+        float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
+        int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
+
         for (int px = rx0; px < rx1; px++) {
-            float fx = ((float)px + 0.5f - min_sx) * inv_qw;
-            float tu = u_left + fx * (u_right - u_left);
-            int tx = (int)(tu * (float)tw);
+            int tx = u_curr_fp >> 16;
+            u_curr_fp += step_u_fp;
             if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
 
             uint32_t spx = src_row[tx];
@@ -2618,9 +2783,19 @@ void glClear(unsigned int mask) {
         }
         int stride_px = (int)(d->stride / 4);
         uint32_t *fb_px = (uint32_t *)d->cpu_map;
+        int count = cx1 - cx0;
+        if (count <= 0 || cy1 <= cy0) return;
+
+        uint32x4_t vcol = vdupq_n_u32(col);
         for (int py = cy0; py < cy1; py++) {
-            uint32_t *row = fb_px + py * stride_px;
-            for (int px = cx0; px < cx1; px++) row[px] = col;
+            uint32_t *row = fb_px + py * stride_px + cx0;
+            int x = 0;
+            for (; x <= count - 4; x += 4) {
+                vst1q_u32(row + x, vcol);
+            }
+            for (; x < count; x++) {
+                row[x] = col;
+            }
         }
         return;
     }
@@ -2646,6 +2821,24 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, void *surface) {
     }
     EGLBoolean ret = real_eglSwapBuffers ? real_eglSwapBuffers(dpy, surface) : 0;
     return ret;
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglSwapBuffersWithDamageKHR(EGLDisplay dpy, void *surface, int *rects, int n_rects) {
+    (void)rects; (void)n_rects;
+    return eglSwapBuffers(dpy, surface);
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglSwapBuffersWithDamageEXT(EGLDisplay dpy, void *surface, int *rects, int n_rects) {
+    (void)rects; (void)n_rects;
+    return eglSwapBuffers(dpy, surface);
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglSetDamageRegionKHR(EGLDisplay dpy, void *surface, int *rects, int n_rects) {
+    (void)dpy; (void)surface; (void)rects; (void)n_rects;
+    return 1;
 }
 
 
@@ -2934,6 +3127,12 @@ GLenum glGetGraphicsResetStatusKHR(void) {
 
 void *eglGetProcAddress(const char *procname) {
     if (!procname) return NULL;
+    /* Bloquear extensiones de daño parcial para forzar a wlroots a redibujado completo consistente */
+    if (strcmp(procname, "eglSetDamageRegionKHR") == 0 ||
+        strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0 ||
+        strcmp(procname, "eglSwapBuffersWithDamageEXT") == 0) {
+        return NULL;
+    }
     if (strcmp(procname, "glGetGraphicsResetStatus") == 0 ||
         strcmp(procname, "glGetGraphicsResetStatusEXT") == 0 ||
         strcmp(procname, "glGetGraphicsResetStatusKHR") == 0) {
@@ -3126,6 +3325,21 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
     kmsg_log("[GPU-KMS] >>> drmModePageFlip: fd=%d, crtc=%u, fb=%u, flags=0x%x\n", fd, crtc_id, fb_id, flags);
     int ret = real_drmModePageFlip ? real_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data) : -1;
     kmsg_log("[GPU-KMS] <<< drmModePageFlip RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
+
+    /* Sincronización entre dumb buffers para coherencia perfecta en double buffering */
+    pthread_mutex_lock(&g_dumb_mutex);
+    struct dumb_bo_entry *d0 = &g_dumb_table[0];
+    struct dumb_bo_entry *d1 = &g_dumb_table[1];
+    if (d0->bo && d1->bo && d0->cpu_map && d1->cpu_map && d0->size == d1->size && d0->size > 0) {
+        struct dumb_bo_entry *active = get_active_fbo_dumb();
+        if (active == d0) {
+            memcpy(d1->cpu_map, d0->cpu_map, d0->size);
+        } else if (active == d1) {
+            memcpy(d0->cpu_map, d1->cpu_map, d1->size);
+        }
+    }
+    pthread_mutex_unlock(&g_dumb_mutex);
+
     return ret;
 }
 

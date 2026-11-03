@@ -1,7 +1,7 @@
 CROSS_COMPILE ?= aarch64-linux-gnu-
 CC = $(CROSS_COMPILE)gcc
 DRM_INC = -I/home/danilo/Documentos/TABLET/drm_include -I/home/danilo/Documentos/TABLET/drm_include/libdrm
-CFLAGS ?= -O2 -fPIC -Wall -std=gnu11 -fno-builtin -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(DRM_INC)
+CFLAGS ?= -O3 -march=armv8.2-a+crypto -fPIC -Wall -std=gnu11 -fno-builtin -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(DRM_INC)
 LDFLAGS ?= -shared -lpthread -ldl
 
 TARGETS = libgpu_interface_driver.so libmali_shim.so
