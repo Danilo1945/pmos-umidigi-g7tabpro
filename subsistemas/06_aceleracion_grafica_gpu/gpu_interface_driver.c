@@ -2736,7 +2736,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         float ndc_x = vx[i] * sp->proj[0] + vy[i] * sp->proj[1] + sp->proj[2];
         float ndc_y = vx[i] * sp->proj[3] + vy[i] * sp->proj[4] + sp->proj[5];
         sx[i] = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
-        sy[i] = (float)g_vp_y + (ndc_y + 1.0f) * 0.5f * (float)g_vp_h;
+        sy[i] = (float)g_vp_y + (1.0f - ndc_y) * 0.5f * (float)g_vp_h;
         u[i]  = vx[i] * sp->tex_proj[0] + vy[i] * sp->tex_proj[1] + sp->tex_proj[2];
         v[i]  = vx[i] * sp->tex_proj[3] + vy[i] * sp->tex_proj[4] + sp->tex_proj[5];
         if (sx[i] < min_sx) min_sx = sx[i];
@@ -2756,13 +2756,17 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     u[0], u[1], u[2], u[3], v[0], v[1], v[2], v[3]);
     }
 
-    /* Aplicar recorte de Scissor y límites del Framebuffer */
+    /* Aplicar recorte de Scissor y límites del Framebuffer (mapeando origen inferior OpenGL a origen superior Framebuffer) */
     int clip_x0 = 0, clip_y0 = 0, clip_x1 = fb_w, clip_y1 = fb_h;
     if (g_scissor_enabled) {
-        if (g_sc_x > clip_x0) clip_x0 = g_sc_x;
-        if (g_sc_y > clip_y0) clip_y0 = g_sc_y;
-        if (g_sc_x + g_sc_w < clip_x1) clip_x1 = g_sc_x + g_sc_w;
-        if (g_sc_y + g_sc_h < clip_y1) clip_y1 = g_sc_y + g_sc_h;
+        int sc_x0 = g_sc_x;
+        int sc_x1 = g_sc_x + g_sc_w;
+        int sc_y0 = fb_h - (g_sc_y + g_sc_h);
+        int sc_y1 = fb_h - g_sc_y;
+        if (sc_x0 > clip_x0) clip_x0 = sc_x0;
+        if (sc_y0 > clip_y0) clip_y0 = sc_y0;
+        if (sc_x1 < clip_x1) clip_x1 = sc_x1;
+        if (sc_y1 < clip_y1) clip_y1 = sc_y1;
     }
 
     int rx0 = (x0 > clip_x0) ? x0 : clip_x0;
@@ -2837,8 +2841,8 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (is_1to1) {
         int base_x = (int)(min_sx + 0.5f);
         int base_y = (int)(min_sy + 0.5f);
-        int rev_x = (u_left > u_right);
-        int rev_y = (v_top > v_bottom);
+        int rev_x = 0;
+        int rev_y = 0;
 
         for (int py = ry0; py < ry1; py++) {
             int row_rel = py - base_y;
