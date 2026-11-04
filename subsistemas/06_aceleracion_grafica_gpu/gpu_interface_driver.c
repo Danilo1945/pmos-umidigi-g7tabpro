@@ -2629,6 +2629,70 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
     }
 }
 
+/* Rutina NEON para mezcla premultiplicada invertida en X con modulación de opacidad */
+static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_end, int count, uint32_t alpha_scale) {
+    static const uint8_t s_rev_table[16] = {
+        12, 13, 14, 15,
+         8,  9, 10, 11,
+         4,  5,  6,  7,
+         0,  1,  2,  3
+    };
+    uint8x16_t rev_mask = vld1q_u8(s_rev_table);
+    static const uint8_t s_dup_alpha_idx[16] = {
+        3, 3, 3, 3,
+        7, 7, 7, 7,
+        11, 11, 11, 11,
+        15, 15, 15, 15
+    };
+    uint8x16_t v_idx = vld1q_u8(s_dup_alpha_idx);
+    uint8x16_t v_255 = vdupq_n_u8(255);
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF,
+        0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
+    uint8x8_t v_ascale = vdup_n_u8((uint8_t)alpha_scale);
+
+    int i = 0;
+    for (; i <= count - 4; i += 4) {
+        const uint32_t *s = src_end - (i + 4);
+        uint8x16_t vraw = vld1q_u8((const uint8_t *)s);
+        uint8x16_t vsrc_rev = vqtbl1q_u8(vraw, rev_mask);
+
+        /* Modulación de opacidad */
+        uint16x8_t s_lo = vmull_u8(vget_low_u8(vsrc_rev), v_ascale);
+        uint16x8_t s_hi = vmull_u8(vget_high_u8(vsrc_rev), v_ascale);
+        uint8x16_t vsrc = vcombine_u8(vshrn_n_u16(s_lo, 8), vshrn_n_u16(s_hi, 8));
+
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
+        uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
+
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(vdst), vget_low_u8(vinv_a));
+        uint16x8_t prod_hi = vmull_u8(vget_high_u8(vdst), vget_high_u8(vinv_a));
+
+        uint8x8_t scaled_lo = vshrn_n_u16(prod_lo, 8);
+        uint8x8_t scaled_hi = vshrn_n_u16(prod_hi, 8);
+        uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
+
+        uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
+        res = vorrq_u8(res, v_amask);
+
+        vst1q_u8((uint8_t *)(dst + i), res);
+    }
+    for (; i < count; i++) {
+        uint32_t spx = *(src_end - 1 - i);
+        uint32_t sa = ((spx >> 24) & 0xFF) * alpha_scale / 256;
+        uint32_t sr = (((spx >> 16) & 0xFF) * alpha_scale) / 256;
+        uint32_t sg = (((spx >> 8) & 0xFF) * alpha_scale) / 256;
+        uint32_t sb = ((spx & 0xFF) * alpha_scale) / 256;
+        spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+        dst[i] = blend_premult_argb(spx, dst[i]);
+    }
+}
+
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     (void)mode;
@@ -2758,8 +2822,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (max_v - min_v < 0.001f) { min_v = 0.0f; max_v = 1.0f; }
     float u_left = min_u, u_right = max_u;
     float v_top = min_v,  v_bottom = max_v;
-    if (sx[0] > sx[2]) { float tmp = u_left; u_left = u_right; u_right = tmp; }
-    if (sy[0] > sy[1]) { float tmp = v_top; v_top = v_bottom; v_bottom = tmp; }
 
     int tw = st->width;
     int th = st->height;
@@ -2812,8 +2874,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                 const uint32_t *src_end = src_row + (tw - tx_start);
                 if (is_opaque_shader && alpha_scale >= 255u) {
                     copy_row_neon_rev(dst_row + rx0, src_end, count);
-                } else {
+                } else if (alpha_scale >= 255u) {
                     blend_row_neon_rev(dst_row + rx0, src_end, count);
+                } else {
+                    blend_row_neon_rev_alpha(dst_row + rx0, src_end, count, alpha_scale);
                 }
             }
         }
