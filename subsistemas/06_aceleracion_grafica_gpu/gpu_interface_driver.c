@@ -2786,7 +2786,9 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             uint32_t opaque_col = col | 0xFF000000u;
             uint32x4_t vcol = vdupq_n_u32(opaque_col);
             for (int py = ry0; py < ry1; py++) {
-                uint32_t *dst_row = fb_px + py * fb_stride_px + rx0;
+                int target_py = fb_h - 1 - py;
+                int dst_col_start = fb_w - rx1;
+                uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
                 int x = 0;
                 for (; x <= count - 4; x += 4) {
                     vst1q_u32(dst_row + x, vcol);
@@ -2797,9 +2799,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             }
         } else {
             for (int py = ry0; py < ry1; py++) {
-                uint32_t *dst_row = fb_px + py * fb_stride_px;
-                for (int px = rx0; px < rx1; px++) {
-                    dst_row[px] = blend_premult_argb(col, dst_row[px]);
+                int target_py = fb_h - 1 - py;
+                int dst_col_start = fb_w - rx1;
+                uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+                for (int x = 0; x < count; x++) {
+                    dst_row[dst_col_start + x] = blend_premult_argb(col, dst_row[dst_col_start + x]);
                 }
             }
         }
@@ -2841,48 +2845,33 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (is_1to1) {
         int base_x = (int)(min_sx + 0.5f);
         int base_y = (int)(min_sy + 0.5f);
-        int rev_x = 0;
-        int rev_y = 0;
+
+        int tx_start = rx0 - base_x;
+        int count = rx1 - rx0;
+        if (tx_start < 0) {
+            count += tx_start;
+            tx_start = 0;
+        }
+        if (tx_start + count > tw) count = tw - tx_start;
+        if (count <= 0) return;
+
+        int dst_col_start = fb_w - (rx0 + count);
 
         for (int py = ry0; py < ry1; py++) {
             int row_rel = py - base_y;
             if (row_rel < 0 || row_rel >= th) continue;
-            int ty = rev_y ? (th - 1 - row_rel) : row_rel;
-            const uint32_t *src_row = st->pixels + ty * tw;
-            uint32_t *dst_row = fb_px + py * fb_stride_px;
+            const uint32_t *src_row = st->pixels + row_rel * tw;
 
-            int tx_start = rx0 - base_x;
-            int count = rx1 - rx0;
-            if (tx_start < 0) {
-                count += tx_start;
-                rx0 -= tx_start;
-                tx_start = 0;
-            }
-            if (tx_start + count > tw) count = tw - tx_start;
-            if (count <= 0) continue;
+            int target_py = fb_h - 1 - py;
+            uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+            const uint32_t *src_end = src_row + tx_start + count;
 
-            if (!rev_x) {
-                /* Dirección X normal */
-                if (is_opaque_shader && alpha_scale >= 255u) {
-                    /* Fast-path instantáneo memcpy: ~0.3ms por frame completo */
-                    memcpy(dst_row + rx0, src_row + tx_start, (size_t)count * sizeof(uint32_t));
-                } else if (alpha_scale >= 255u) {
-                    /* Vectorizado NEON a 4 píxeles por ciclo */
-                    blend_row_neon(dst_row + rx0, src_row + tx_start, count);
-                } else {
-                    /* Vectorizado NEON con modulación de opacidad */
-                    blend_row_neon_alpha(dst_row + rx0, src_row + tx_start, count, alpha_scale);
-                }
+            if (is_opaque_shader && alpha_scale >= 255u) {
+                copy_row_neon_rev(dst_row + dst_col_start, src_end, count);
+            } else if (alpha_scale >= 255u) {
+                blend_row_neon_rev(dst_row + dst_col_start, src_end, count);
             } else {
-                /* Dirección X invertida (rotación 180° / flip horizontal) */
-                const uint32_t *src_end = src_row + (tw - tx_start);
-                if (is_opaque_shader && alpha_scale >= 255u) {
-                    copy_row_neon_rev(dst_row + rx0, src_end, count);
-                } else if (alpha_scale >= 255u) {
-                    blend_row_neon_rev(dst_row + rx0, src_end, count);
-                } else {
-                    blend_row_neon_rev_alpha(dst_row + rx0, src_end, count, alpha_scale);
-                }
+                blend_row_neon_rev_alpha(dst_row + dst_col_start, src_end, count, alpha_scale);
             }
         }
         return;
@@ -2900,7 +2889,9 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int ty = (int)(tv * (float)th);
         if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
         const uint32_t *src_row = st->pixels + ty * tw;
-        uint32_t *dst_row = fb_px + py * fb_stride_px;
+
+        int target_py = fb_h - 1 - py;
+        uint32_t *dst_row = fb_px + target_py * fb_stride_px;
 
         float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
         int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
@@ -2910,9 +2901,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             u_curr_fp += step_u_fp;
             if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
 
+            int target_px = (fb_w - 1) - px;
             uint32_t spx = src_row[tx];
             if (is_opaque_shader && alpha_scale >= 255u) {
-                dst_row[px] = spx | 0xFF000000u;
+                dst_row[target_px] = spx | 0xFF000000u;
             } else {
                 if (sp->is_tex == 2) spx |= 0xFF000000u;
                 if (alpha_scale < 255u) {
@@ -2922,7 +2914,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
                     spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
                 }
-                dst_row[px] = blend_premult_argb(spx, dst_row[px]);
+                dst_row[target_px] = blend_premult_argb(spx, dst_row[target_px]);
             }
         }
     }
@@ -2941,10 +2933,14 @@ void glClear(unsigned int mask) {
         uint32_t col = pack_argb(g_clear_color[0], g_clear_color[1], g_clear_color[2], 1.0f);
         int cx0 = 0, cy0 = 0, cx1 = (int)d->width, cy1 = (int)d->height;
         if (g_scissor_enabled) {
-            if (g_sc_x > cx0) cx0 = g_sc_x;
-            if (g_sc_y > cy0) cy0 = g_sc_y;
-            if (g_sc_x + g_sc_w < cx1) cx1 = g_sc_x + g_sc_w;
-            if (g_sc_y + g_sc_h < cy1) cy1 = g_sc_y + g_sc_h;
+            int sc_x0 = g_sc_x;
+            int sc_x1 = g_sc_x + g_sc_w;
+            int sc_y0 = (int)d->height - (g_sc_y + g_sc_h);
+            int sc_y1 = (int)d->height - g_sc_y;
+            if (sc_x0 > cx0) cx0 = sc_x0;
+            if (sc_y0 > cy0) cy0 = sc_y0;
+            if (sc_x1 < cx1) cx1 = sc_x1;
+            if (sc_y1 < cy1) cy1 = sc_y1;
         }
         int stride_px = (int)(d->stride / 4);
         uint32_t *fb_px = (uint32_t *)d->cpu_map;
@@ -2953,7 +2949,9 @@ void glClear(unsigned int mask) {
 
         uint32x4_t vcol = vdupq_n_u32(col);
         for (int py = cy0; py < cy1; py++) {
-            uint32_t *row = fb_px + py * stride_px + cx0;
+            int target_py = (int)d->height - 1 - py;
+            int dst_col_start = (int)d->width - cx1;
+            uint32_t *row = fb_px + target_py * stride_px + dst_col_start;
             int x = 0;
             for (; x <= count - 4; x += 4) {
                 vst1q_u32(row + x, vcol);
