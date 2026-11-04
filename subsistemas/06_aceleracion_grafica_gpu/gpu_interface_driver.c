@@ -1933,6 +1933,8 @@ static GLuint g_bound_rbo = 0;
 static GLuint g_bound_fbo = 0;
 static GLuint g_current_prog = 0;
 static GLint g_unpack_row_length = 0;
+static GLint g_unpack_skip_rows = 0;
+static GLint g_unpack_skip_pixels = 0;
 static GLint g_vp_x = 0, g_vp_y = 0, g_vp_w = 1200, g_vp_h = 1920;
 static GLboolean g_scissor_enabled = 0;
 static GLint g_sc_x = 0, g_sc_y = 0, g_sc_w = 1200, g_sc_h = 1920;
@@ -2029,17 +2031,22 @@ void glPixelStorei(GLenum pname, GLint param) {
     if (!real_fn) real_fn = resolve_mali_gl("glPixelStorei");
     if (pname == 0x0CF2 /* GL_UNPACK_ROW_LENGTH_EXT */) {
         g_unpack_row_length = param;
+    } else if (pname == 0x0CF3 /* GL_UNPACK_SKIP_ROWS_EXT */) {
+        g_unpack_skip_rows = param;
+    } else if (pname == 0x0CF4 /* GL_UNPACK_SKIP_PIXELS_EXT */) {
+        g_unpack_skip_pixels = param;
     }
     if (real_fn) real_fn(pname, param);
 }
 
 static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int yoffset,
                                          int width, int height, GLenum format,
-                                         const void *pixels, int row_len)
+                                         const void *pixels, int row_len,
+                                         int skip_pixels, int skip_rows)
 {
     if (!st || !st->pixels || !pixels) return;
-    int src_stride_px = (row_len > 0) ? row_len : width;
-    const uint32_t *src32 = (const uint32_t *)pixels;
+    int src_stride_px = (row_len > 0) ? row_len : (xoffset + width);
+    const uint32_t *src32 = (const uint32_t *)pixels + (size_t)skip_rows * src_stride_px + skip_pixels;
     /* GL_BGRA_EXT = 0x80E1, GL_RGBA = 0x1908, GL_RGB = 0x1907 */
     int is_rgba = (format == 0x1908);
 
@@ -2097,7 +2104,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
         }
         st->format = format;
         if (pixels && st->pixels) {
-            convert_and_store_tex_region(st, 0, 0, width, height, format, pixels, g_unpack_row_length);
+            convert_and_store_tex_region(st, 0, 0, width, height, format, pixels,
+                                         g_unpack_row_length, g_unpack_skip_pixels, g_unpack_skip_rows);
         }
         kmsg_always("[GPU-TEX] glTexImage2D tex=%u %dx%d fmt=0x%x row_len=%d pixels=%p\n",
                     g_bound_tex, width, height, format, g_unpack_row_length, pixels);
@@ -2117,7 +2125,8 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     if (level == 0 && g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES && pixels) {
         struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
         if (st->pixels) {
-            convert_and_store_tex_region(st, xoffset, yoffset, width, height, format, pixels, g_unpack_row_length);
+            convert_and_store_tex_region(st, xoffset, yoffset, width, height, format, pixels,
+                                         g_unpack_row_length, g_unpack_skip_pixels, g_unpack_skip_rows);
         }
         return;
     }
@@ -2166,13 +2175,39 @@ void glEGLImageTargetRenderbufferStorageOES(GLenum target, void *image) {
     if (!real_glEGLImageTargetRenderbufferStorageOES) {
         real_glEGLImageTargetRenderbufferStorageOES = resolve_mali_gl("glEGLImageTargetRenderbufferStorageOES");
     }
-    if (g_bound_rbo > 0 && g_bound_rbo < MAX_SHADOW_RBOS) {
-        struct dumb_bo_entry *d = find_egl_image_dumb(image);
-        if (d) g_rbo_dumb[g_bound_rbo] = d;
+    struct dumb_bo_entry *d = find_egl_image_dumb(image);
+    if (d) {
+        if (g_bound_rbo > 0 && g_bound_rbo < MAX_SHADOW_RBOS) {
+            g_rbo_dumb[g_bound_rbo] = d;
+        }
+        if (((uintptr_t)image & 0xFFFF0000) == 0xE6100000) {
+            static void (*real_glRenderbufferStorage_fn)(GLenum, GLenum, GLsizei, GLsizei) = NULL;
+            if (!real_glRenderbufferStorage_fn) real_glRenderbufferStorage_fn = resolve_mali_gl("glRenderbufferStorage");
+            if (real_glRenderbufferStorage_fn) {
+                real_glRenderbufferStorage_fn(target, 0x8058 /* GL_RGBA8_OES */, d->width, d->height);
+            }
+            return;
+        }
     }
     if (real_glEGLImageTargetRenderbufferStorageOES) {
         real_glEGLImageTargetRenderbufferStorageOES(target, image);
     }
+}
+
+__attribute__((visibility("default")))
+GLenum glCheckFramebufferStatus(GLenum target) {
+    static GLenum (*real_fn)(GLenum) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glCheckFramebufferStatus");
+    GLenum status = real_fn ? real_fn(target) : 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */;
+    if (status != 0x8CD5) {
+        if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS) {
+            GLuint rbo = g_fbo_rbo[g_bound_fbo];
+            if (rbo > 0 && rbo < MAX_SHADOW_RBOS && g_rbo_dumb[rbo] != NULL) {
+                return 0x8CD5;
+            }
+        }
+    }
+    return status;
 }
 
 static void (*real_glEGLImageTargetTexture2DOES)(GLenum, void *) = NULL;
@@ -2181,9 +2216,9 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
     if (!real_glEGLImageTargetTexture2DOES) {
         real_glEGLImageTargetTexture2DOES = resolve_mali_gl("glEGLImageTargetTexture2DOES");
     }
-    if (g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES) {
-        struct dumb_bo_entry *d = find_egl_image_dumb(image);
-        if (d && d->cpu_map && d->width > 0 && d->height > 0) {
+    struct dumb_bo_entry *d = find_egl_image_dumb(image);
+    if (d && d->cpu_map && d->width > 0 && d->height > 0) {
+        if (g_bound_tex > 0 && g_bound_tex < MAX_SHADOW_TEXTURES) {
             struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
             if (st->width != (int)d->width || st->height != (int)d->height || !st->pixels) {
                 free(st->pixels);
@@ -2193,9 +2228,15 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
             }
             if (st->pixels) {
                 convert_and_store_tex_region(st, 0, 0, (int)d->width, (int)d->height,
-                                             0x80E1 /* BGRA */, d->cpu_map, (int)(d->stride / 4));
+                                             0x80E1 /* BGRA */, d->cpu_map, (int)(d->stride / 4), 0, 0);
             }
         }
+        static void (*real_glTexImage2D_fn)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = NULL;
+        if (!real_glTexImage2D_fn) real_glTexImage2D_fn = resolve_mali_gl("glTexImage2D");
+        if (real_glTexImage2D_fn) {
+            real_glTexImage2D_fn(target, 0, 0x1908 /* GL_RGBA */, d->width, d->height, 0, 0x80E1 /* GL_BGRA_EXT */, 0x1401 /* GL_UNSIGNED_BYTE */, d->cpu_map);
+        }
+        return;
     }
     if (real_glEGLImageTargetTexture2DOES) {
         real_glEGLImageTargetTexture2DOES(target, image);
@@ -2215,6 +2256,10 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
     if (!real_fn) real_fn = resolve_mali_gl("glScissor");
     g_sc_x = x; g_sc_y = y; g_sc_w = width; g_sc_h = height;
+    static int s_sc_log = 0;
+    if (++s_sc_log <= 40) {
+        kmsg_always("[SCISSOR #%d] x=%d, y=%d, w=%d, h=%d\n", s_sc_log, x, y, width, height);
+    }
     if (real_fn) real_fn(x, y, width, height);
 }
 
@@ -3142,22 +3187,49 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
         }
         patched_attribs[count] = EGL_NONE;
 
-        kmsg_log("[GPU-EGL] >>> eglCreateImageKHR(DMA_BUF): %ux%u, format=0x%x, fd=%d, stride=%u -> mod=LINEAR\n",
+        kmsg_always("[GPU-EGL] >>> eglCreateImageKHR(DMA_BUF): %ux%u, format=0x%x, fd=%d, stride=%u -> mod=LINEAR\n",
                  w, h, fourcc, dma_fd, stride);
         EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, patched_attribs) : NULL;
 
         /* Fallback nativo Mali: Si DMA_BUF import falla, importar vía EGL_NATIVE_PIXMAP_KHR sobre el BO de Mali */
         if (!img && matched_entry && matched_entry->bo) {
-            kmsg_log("[GPU-EGL] Fallback DMA_BUF -> EGL_NATIVE_PIXMAP_KHR con bo=%p\n", (void*)matched_entry->bo);
+            kmsg_always("[GPU-EGL] Fallback DMA_BUF -> EGL_NATIVE_PIXMAP_KHR con bo=%p\n", (void*)matched_entry->bo);
             img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)matched_entry->bo, NULL) : NULL;
         }
 
+        /* Fallback CPU Memory Map: Si Mali no puede importar el DMA-BUF, mapeamos directamente el dmabuf fd */
+        if (!img && dma_fd >= 0 && w > 0 && h > 0 && stride > 0) {
+            size_t map_sz = (size_t)stride * (size_t)h;
+            void *cpu_ptr = mmap(NULL, map_sz, PROT_READ, MAP_SHARED, dma_fd, 0);
+            if (cpu_ptr && cpu_ptr != MAP_FAILED) {
+                static struct dumb_bo_entry s_client_dmabuf_pool[32];
+                static int s_client_pool_idx = 0;
+                int pool_slot = (s_client_pool_idx++) % 32;
+                struct dumb_bo_entry *cde = &s_client_dmabuf_pool[pool_slot];
+                if (cde->cpu_map && cde->cpu_map != cpu_ptr) {
+                    munmap(cde->cpu_map, (size_t)cde->stride * cde->height);
+                }
+                cde->width = w;
+                cde->height = h;
+                cde->stride = stride;
+                cde->cpu_map = cpu_ptr;
+                cde->prime_fd = dma_fd;
+                cde->bo = (struct gbm_bo *)cde;
+
+                static uint64_t s_dmabuf_dummy_handle = 0xE6100000ULL;
+                img = (EGLImageKHR)(uintptr_t)(++s_dmabuf_dummy_handle);
+                register_egl_image_dumb(img, cde);
+                kmsg_always("[GPU-EGL] Fallback DMA-BUF mapeado por CPU mmap: img=%p, %ux%u stride=%u ptr=%p\n",
+                            (void*)img, w, h, stride, cpu_ptr);
+            }
+        }
+
         if (img && matched_entry) register_egl_image_dumb(img, matched_entry);
-        kmsg_log("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
+        kmsg_always("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
         return img;
     }
 
-    kmsg_log("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
+    kmsg_always("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
     EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list) : NULL;
     if (img && target == EGL_NATIVE_PIXMAP_KHR && buffer) {
         pthread_mutex_lock(&g_dumb_mutex);
@@ -3165,19 +3237,29 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
         pthread_mutex_unlock(&g_dumb_mutex);
         if (de) register_egl_image_dumb(img, de);
     }
-    kmsg_log("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
+    kmsg_always("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
     return img;
 }
 
 __attribute__((visibility("default")))
 EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR img) {
+    kmsg_log("[GPU-EGL] >>> eglDestroyImageKHR: img=%p\n", (void*)img);
+    if (((uintptr_t)img & 0xFFFF0000) == 0xE6100000) {
+        for (int i = 0; i < MAX_EGL_IMG_MAP; i++) {
+            if (g_egl_img_map[i].img == (void*)img) {
+                g_egl_img_map[i].img = NULL;
+                g_egl_img_map[i].dumb = NULL;
+                break;
+            }
+        }
+        return 1;
+    }
     if (!real_eglDestroyImageKHR) {
         void *mali = dlopen("/usr/lib/libmali-bifrost-patched.so", RTLD_LAZY | RTLD_GLOBAL);
         if (!mali) mali = dlopen("/usr/lib/libmali-bifrost.so", RTLD_LAZY | RTLD_GLOBAL);
         if (mali) real_eglDestroyImageKHR = dlsym(mali, "eglDestroyImageKHR");
         if (!real_eglDestroyImageKHR) real_eglDestroyImageKHR = dlsym(RTLD_NEXT, "eglDestroyImageKHR");
     }
-    kmsg_log("[GPU-EGL] >>> eglDestroyImageKHR: img=%p\n", (void*)img);
     EGLBoolean ret = real_eglDestroyImageKHR ? real_eglDestroyImageKHR(dpy, img) : 1;
     return ret;
 }
@@ -3347,6 +3429,7 @@ void *eglGetProcAddress(const char *procname) {
     if (strcmp(procname, "glTexSubImage2D") == 0) return (void *)glTexSubImage2D;
     if (strcmp(procname, "glBindRenderbuffer") == 0) return (void *)glBindRenderbuffer;
     if (strcmp(procname, "glBindFramebuffer") == 0) return (void *)glBindFramebuffer;
+    if (strcmp(procname, "glCheckFramebufferStatus") == 0) return (void *)glCheckFramebufferStatus;
     if (strcmp(procname, "glFramebufferRenderbuffer") == 0) return (void *)glFramebufferRenderbuffer;
     if (strcmp(procname, "glFramebufferTexture2D") == 0) return (void *)glFramebufferTexture2D;
     if (strcmp(procname, "glViewport") == 0) return (void *)glViewport;
