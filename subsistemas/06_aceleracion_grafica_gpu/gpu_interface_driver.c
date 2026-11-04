@@ -2234,7 +2234,7 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
         static void (*real_glTexImage2D_fn)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = NULL;
         if (!real_glTexImage2D_fn) real_glTexImage2D_fn = resolve_mali_gl("glTexImage2D");
         if (real_glTexImage2D_fn) {
-            real_glTexImage2D_fn(target, 0, 0x1908 /* GL_RGBA */, d->width, d->height, 0, 0x80E1 /* GL_BGRA_EXT */, 0x1401 /* GL_UNSIGNED_BYTE */, d->cpu_map);
+            real_glTexImage2D_fn(target, 0, 0x80E1 /* GL_BGRA_EXT */, d->width, d->height, 0, 0x80E1 /* GL_BGRA_EXT */, 0x1401 /* GL_UNSIGNED_BYTE */, d->cpu_map);
         }
         return;
     }
@@ -2256,10 +2256,6 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
     if (!real_fn) real_fn = resolve_mali_gl("glScissor");
     g_sc_x = x; g_sc_y = y; g_sc_w = width; g_sc_h = height;
-    static int s_sc_log = 0;
-    if (++s_sc_log <= 40) {
-        kmsg_always("[SCISSOR #%d] x=%d, y=%d, w=%d, h=%d\n", s_sc_log, x, y, width, height);
-    }
     if (real_fn) real_fn(x, y, width, height);
 }
 
@@ -2610,6 +2606,16 @@ static inline void copy_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int
     uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
 
     int i = 0;
+    for (; i <= count - 8; i += 8) {
+        const uint32_t *s0 = src_end - (i + 4);
+        const uint32_t *s1 = src_end - (i + 8);
+        uint8x16_t v0 = vld1q_u8((const uint8_t *)s0);
+        uint8x16_t v1 = vld1q_u8((const uint8_t *)s1);
+        uint8x16_t r0 = vorrq_u8(vqtbl1q_u8(v0, rev_mask), v_amask);
+        uint8x16_t r1 = vorrq_u8(vqtbl1q_u8(v1, rev_mask), v_amask);
+        vst1q_u8((uint8_t *)(dst + i), r0);
+        vst1q_u8((uint8_t *)(dst + i + 4), r1);
+    }
     for (; i <= count - 4; i += 4) {
         const uint32_t *s = src_end - (i + 4);
         uint8x16_t v = vld1q_u8((const uint8_t *)s);
@@ -2622,7 +2628,7 @@ static inline void copy_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int
     }
 }
 
-/* Rutina NEON para mezcla premultiplicada invertida en X a 4 píxeles por ciclo */
+/* Rutina NEON para mezcla premultiplicada invertida en X a 8 píxeles por ciclo */
 static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int count) {
     static const uint8_t s_rev_table[16] = {
         12, 13, 14, 15,
@@ -2648,6 +2654,39 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
     uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
 
     int i = 0;
+    for (; i <= count - 8; i += 8) {
+        const uint32_t *s0 = src_end - (i + 4);
+        const uint32_t *s1 = src_end - (i + 8);
+        uint8x16_t vraw0 = vld1q_u8((const uint8_t *)s0);
+        uint8x16_t vraw1 = vld1q_u8((const uint8_t *)s1);
+        uint8x16_t vsrc0 = vqtbl1q_u8(vraw0, rev_mask);
+        uint8x16_t vsrc1 = vqtbl1q_u8(vraw1, rev_mask);
+        uint8x16_t vdst0 = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t vdst1 = vld1q_u8((const uint8_t *)(dst + i + 4));
+
+        uint8x16_t valpha0 = vqtbl1q_u8(vsrc0, v_idx);
+        uint8x16_t valpha1 = vqtbl1q_u8(vsrc1, v_idx);
+        uint8x16_t vinv_a0 = vsubq_u8(v_255, valpha0);
+        uint8x16_t vinv_a1 = vsubq_u8(v_255, valpha1);
+
+        uint16x8_t prod_lo0 = vmull_u8(vget_low_u8(vdst0), vget_low_u8(vinv_a0));
+        uint16x8_t prod_hi0 = vmull_u8(vget_high_u8(vdst0), vget_high_u8(vinv_a0));
+        uint16x8_t prod_lo1 = vmull_u8(vget_low_u8(vdst1), vget_low_u8(vinv_a1));
+        uint16x8_t prod_hi1 = vmull_u8(vget_high_u8(vdst1), vget_high_u8(vinv_a1));
+
+        uint8x8_t scaled_lo0 = vshrn_n_u16(prod_lo0, 8);
+        uint8x8_t scaled_hi0 = vshrn_n_u16(prod_hi0, 8);
+        uint8x8_t scaled_lo1 = vshrn_n_u16(prod_lo1, 8);
+        uint8x8_t scaled_hi1 = vshrn_n_u16(prod_hi1, 8);
+        uint8x16_t scaled_dst0 = vcombine_u8(scaled_lo0, scaled_hi0);
+        uint8x16_t scaled_dst1 = vcombine_u8(scaled_lo1, scaled_hi1);
+
+        uint8x16_t res0 = vorrq_u8(vqaddq_u8(vsrc0, scaled_dst0), v_amask);
+        uint8x16_t res1 = vorrq_u8(vqaddq_u8(vsrc1, scaled_dst1), v_amask);
+
+        vst1q_u8((uint8_t *)(dst + i), res0);
+        vst1q_u8((uint8_t *)(dst + i + 4), res1);
+    }
     for (; i <= count - 4; i += 4) {
         const uint32_t *s = src_end - (i + 4);
         uint8x16_t vraw = vld1q_u8((const uint8_t *)s);
@@ -2664,9 +2703,7 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
         uint8x8_t scaled_hi = vshrn_n_u16(prod_hi, 8);
         uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
 
-        uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
-        res = vorrq_u8(res, v_amask);
-
+        uint8x16_t res = vorrq_u8(vqaddq_u8(vsrc, scaled_dst), v_amask);
         vst1q_u8((uint8_t *)(dst + i), res);
     }
     for (; i < count; i++) {
@@ -2743,28 +2780,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     (void)mode;
     s_draw_call_counter++;
     struct dumb_bo_entry *d = get_active_fbo_dumb();
-    if (s_draw_call_counter <= 25) {
-        kmsg_always("[GPU-DRAW #%d] fbo=%u, dumb=%p (map=%p), prog=%u (is_tex=%d), tex=%u (%dx%d, px=%p), vp=%dx%d, ptr=%p\n",
-                    s_draw_call_counter, g_bound_fbo, (void*)d, d ? d->cpu_map : NULL,
-                    g_current_prog, (g_current_prog < MAX_SHADOW_Programs) ? g_progs[g_current_prog].is_tex : -1,
-                    g_bound_tex, (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].width : -1,
-                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].height : -1,
-                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? (void*)g_shadow_tex[g_bound_tex].pixels : NULL,
-                    g_vp_w, g_vp_h, (const void*)g_attrib0_ptr);
-    }
     if (!d || !d->cpu_map || g_current_prog == 0 || g_current_prog >= MAX_SHADOW_Programs) {
         return;
     }
 
     struct shadow_prog *sp = &g_progs[g_current_prog];
-    if (sp->is_tex > 0 && g_bound_tex > 1 && s_draw_call_counter <= 500) {
-        kmsg_always("[GPU-DRAW-WIN #%d] fbo=%u prog=%u(is_tex=%d) tex=%u (%dx%d) alpha=%.2f\n",
-                    s_draw_call_counter, g_bound_fbo, g_current_prog, sp->is_tex,
-                    g_bound_tex,
-                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].width : -1,
-                    (g_bound_tex < MAX_SHADOW_TEXTURES) ? g_shadow_tex[g_bound_tex].height : -1,
-                    sp->alpha);
-    }
     int fb_w = (int)d->width;
     int fb_h = (int)d->height;
     int fb_stride_px = (int)(d->stride / 4);
@@ -2794,12 +2814,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int x1 = (int)(max_sx + 0.5f);
     int y0 = (int)(min_sy + 0.5f);
     int y1 = (int)(max_sy + 0.5f);
-    if (s_draw_call_counter <= 60) {
-        kmsg_always("  [QUAD #%d] prog=%u(tex=%d) tex=%u box=(%d,%d)-(%d,%d) sc=%d(%d,%d %dx%d) u=(%.2f,%.2f,%.2f,%.2f) v=(%.2f,%.2f,%.2f,%.2f)\n",
-                    s_draw_call_counter, g_current_prog, sp->is_tex, g_bound_tex,
-                    x0, y0, x1, y1, g_scissor_enabled, g_sc_x, g_sc_y, g_sc_w, g_sc_h,
-                    u[0], u[1], u[2], u[3], v[0], v[1], v[2], v[3]);
-    }
 
     /* Aplicar recorte de Scissor y límites del Framebuffer (mapeando origen inferior OpenGL a origen superior Framebuffer) */
     int clip_x0 = 0, clip_y0 = 0, clip_x1 = fb_w, clip_y1 = fb_h;
