@@ -3404,29 +3404,6 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
     return ret;
 }
 
-static void flip_180_inplace(uint32_t *map, int width, int height, int stride_px) {
-    if (!map || width <= 0 || height <= 0 || stride_px <= 0) return;
-    int half_h = height / 2;
-    for (int y = 0; y < half_h; y++) {
-        uint32_t *row_top = map + y * stride_px;
-        uint32_t *row_bot = map + (height - 1 - y) * stride_px;
-        int left = 0;
-        int right = width - 1;
-        while (left < right) {
-            uint32_t t_l = row_top[left];
-            uint32_t t_r = row_top[right];
-            uint32_t b_l = row_bot[left];
-            uint32_t b_r = row_bot[right];
-            row_top[left]  = b_r;
-            row_top[right] = b_l;
-            row_bot[left]  = t_r;
-            row_bot[right] = t_l;
-            left++;
-            right--;
-        }
-    }
-}
-
 int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
                     uint32_t flags, void *user_data)
 {
@@ -3442,23 +3419,6 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
             if (ldrm) real_drmModePageFlip = dlsym(ldrm, "drmModePageFlip");
         }
     }
-
-    static int s_flip_180_scanout = -1;
-    if (s_flip_180_scanout < 0) {
-        const char *e = getenv("GPU_FLIP_180");
-        s_flip_180_scanout = (e && atoi(e) == 0) ? 0 : 1;
-    }
-
-    if (s_flip_180_scanout) {
-        pthread_mutex_lock(&g_dumb_mutex);
-        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-            if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].width > 0 && g_dumb_table[i].height > 0) {
-                flip_180_inplace((uint32_t *)g_dumb_table[i].cpu_map, (int)g_dumb_table[i].width, (int)g_dumb_table[i].height, (int)(g_dumb_table[i].stride / 4));
-            }
-        }
-        pthread_mutex_unlock(&g_dumb_mutex);
-    }
-
     kmsg_log("[GPU-KMS] >>> drmModePageFlip: fd=%d, crtc=%u, fb=%u, flags=0x%x\n", fd, crtc_id, fb_id, flags);
     int ret = real_drmModePageFlip ? real_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data) : -1;
     kmsg_log("[GPU-KMS] <<< drmModePageFlip RET=%d (errno=%d)\n", ret, ret < 0 ? errno : 0);
