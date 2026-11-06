@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# DAEMON DE GESTIÓN DE HARDWARE, ENERGÍA, BLOQUEO Y ROTACIÓN
-# UMIDIGI G7 Tab Pro (MT6789 Helio G99) - postmarketOS Phosh
+# DAEMON MAESTRO DE GESTIÓN DE ENERGÍA, BOTÓN POWER, VOLUMEN, BRILLO Y SUSPENSIÓN
+# UMIDIGI G7 Tab Pro (MT6789 Helio G99) - postmarketOS Phosh + GPU Mali-G57
 # ==============================================================================
 import os
 import sys
@@ -10,20 +10,21 @@ import time
 import select
 import struct
 import fcntl
-import array
 import subprocess
 import threading
 
 EVENT_FORMAT = 'llHHI'
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
 EV_KEY = 1
-EV_SW = 5
 
 KEY_VOLUMEDOWN = 114
 KEY_VOLUMEUP   = 115
 KEY_POWER      = 116
 
 EVIOCGRAB = 0x40044590
+
+MIN_SAFE_BRIGHTNESS = 15
+MAX_SAFE_BRIGHTNESS = 100
 
 is_screen_on = True
 saved_backlight_level = 15
@@ -32,6 +33,18 @@ last_power_press_time = 0.0
 current_sensor_orientation = "bottom-up"
 sensor_dbus_conn = None
 login1_dbus_conn = None
+
+BACKLIGHT_PATHS = [
+    "/sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness",
+    "/sys/class/leds/lcd-backlight/brightness",
+]
+
+def release_static_backlight_locks():
+    """Libera bloqueos estáticos de depuración para permitir que este daemon apague la pantalla en reposo."""
+    subprocess.run("killall -9 backlight_lock backlight_guard 2>/dev/null || true", shell=True)
+    for bp in BACKLIGHT_PATHS:
+        subprocess.run(f"umount -l {bp} 2>/dev/null || true", shell=True)
+        subprocess.run(f"chmod 666 {bp} 2>/dev/null || true", shell=True)
 
 def get_session_dbus_address():
     if "DBUS_SESSION_BUS_ADDRESS" in os.environ and os.environ["DBUS_SESSION_BUS_ADDRESS"]:
@@ -50,30 +63,63 @@ def get_session_dbus_address():
     return None
 
 def get_current_backlight():
-    try:
-        with open("/sys/class/leds/lcd-backlight/brightness", "r") as f:
-            val = int(f.read().strip())
-            return val
-    except Exception:
-        return 15
+    for bp in BACKLIGHT_PATHS:
+        try:
+            if os.path.exists(bp):
+                with open(bp, "r") as f:
+                    return int(f.read().strip())
+        except Exception:
+            pass
+    return saved_backlight_level
 
 def set_backlight_hardware(level):
-    if level < 15 and level != 0:
-        level = 15
-    try:
-        with open("/sys/class/leds/lcd-backlight/brightness", "w") as f:
-            f.write(f"{int(level)}\n")
-    except Exception:
-        pass
+    level = int(level)
+    if level != 0:
+        level = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, level))
+    for bp in BACKLIGHT_PATHS:
+        try:
+            if os.path.exists(bp):
+                os.chmod(bp, 0o666)
+                with open(bp, "w") as f:
+                    f.write(f"{level}\n")
+        except Exception:
+            pass
+    for dp in ["/run/dummy_brightness", "/sysroot/run/dummy_brightness"]:
+        try:
+            if os.path.exists(dp):
+                with open(dp, "w") as f:
+                    f.write(f"{level}\n")
+        except Exception:
+            pass
 
-def set_cpu_governors(governor="schedutil"):
+def set_cpu_and_gpu_power(performance=True):
+    gov = "performance" if performance else "powersave"
+    for g in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+        try:
+            with open(g, "w") as f:
+                f.write(f"{gov}\n")
+        except Exception:
+            pass
+
+    # Escalado de GPU ARM Mali-G57 MC2
     try:
-        for g in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
-            try:
-                with open(g, "w") as f:
-                    f.write(f"{governor}\n")
-            except Exception:
-                pass
+        if performance:
+            if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
+                with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
+                    f.write("15\n")  # 812 MHz
+            for mg in glob.glob("/sys/class/devfreq/*.mali/governor"):
+                with open(mg, "w") as f:
+                    f.write("performance\n")
+            for mf in glob.glob("/sys/class/devfreq/*.mali/min_freq"):
+                with open(mf, "w") as f:
+                    f.write("812000000\n")
+        else:
+            if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
+                with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
+                    f.write("37\n")  # 390 MHz (mínimo consumo en reposo)
+            for mf in glob.glob("/sys/class/devfreq/*.mali/min_freq"):
+                with open(mf, "w") as f:
+                    f.write("390000000\n")
     except Exception:
         pass
 
@@ -105,21 +151,28 @@ def wake_screen():
     except Exception as e:
         print(f"[-] Error en ScreenSaver.SetActive(False): {e}", flush=True)
 
-def ensure_desired_orientation():
+def ensure_desired_orientation(force=False):
     global current_sensor_orientation
     target_transform = "180" if current_sensor_orientation == "bottom-up" else ("90" if current_sensor_orientation == "left-up" else "normal")
     try:
-        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
+        if not force:
+            cmd_check = "WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr 2>/dev/null || true"
+            out = subprocess.check_output(cmd_check, shell=True, stderr=subprocess.DEVNULL).decode().strip()
+            if f"Transform: {target_transform}" in out:
+                return
+        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
         subprocess.call(cmd, shell=True)
     except Exception:
         pass
 
 def sleep_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Reposo/Bloqueo activado: apagando pantalla y ahorrando energía...", flush=True)
+    print("[*] Reposo/Bloqueo activado: apagando pantalla y reduciendo consumo CPU/GPU...", flush=True)
     cur = get_current_backlight()
-    if cur > 10:
-        saved_backlight_level = cur
+    if cur >= MIN_SAFE_BRIGHTNESS:
+        saved_backlight_level = min(cur, MAX_SAFE_BRIGHTNESS)
+
+    is_screen_on = False
 
     if login1_dbus_conn:
         try:
@@ -137,23 +190,24 @@ def sleep_tablet():
     # 2. Apagar backlight físico a 0 (cero emisión de luz)
     set_backlight_hardware(0)
 
-    # 3. Gobernadores de CPU en powersave (mínimo consumo)
-    set_cpu_governors("powersave")
+    # 3. Gobernadores de CPU en powersave y GPU en 390 MHz
+    set_cpu_and_gpu_power(performance=False)
 
-    is_screen_on = False
-    print("[*] Tablet en reposo: pantalla 0 nits, CPUs en powersave.", flush=True)
+    print("[*] Tablet en reposo: pantalla 0 nits, CPU en powersave, GPU en 390 MHz.", flush=True)
 
 def wake_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Despertando tablet: reactivando pantalla y rendimiento...", flush=True)
-    # 1. Restaurar CPUs a schedutil
-    set_cpu_governors("schedutil")
+    print("[*] Despertando tablet: reactivando pantalla y aceleración GPU/CPU...", flush=True)
+    is_screen_on = True
+
+    # 1. Restaurar CPUs a performance y GPU Mali a 812 MHz
+    set_cpu_and_gpu_power(performance=True)
 
     # 2. Reactivar salida DRM con rotación al derecho 180°
-    ensure_desired_orientation()
+    ensure_desired_orientation(force=True)
 
-    # 3. Restaurar brillo LCD
-    target_b = saved_backlight_level if saved_backlight_level >= 15 else 15
+    # 3. Restaurar brillo LCD seguro
+    target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
     set_backlight_hardware(target_b)
 
     # 4. Despertar lockscreen
@@ -169,8 +223,7 @@ def wake_tablet():
         except Exception:
             pass
 
-    is_screen_on = True
-    print(f"[*] Tablet activa: pantalla a brillo {target_b}, Phosh lockscreen mostrado.", flush=True)
+    print(f"[*] Tablet activa: pantalla a brillo {target_b}, GPU Mali a 812 MHz.", flush=True)
 
 def toggle_screen_power():
     global last_power_press_time, is_screen_on
@@ -194,7 +247,14 @@ def show_volume_osd(vol, is_muted=False):
             'org.gnome.Shell', '/org/gnome/Shell', 'org.gnome.Shell', None
         )
         level = max(0.0, min(1.0, float(vol)))
-        icon_name = 'audio-volume-muted-symbolic' if (is_muted or level <= 0.03) else ('audio-volume-high-symbolic' if level > 0.6 else 'audio-volume-medium-symbolic')
+        if is_muted or level <= 0.03:
+            icon_name = 'audio-volume-muted-symbolic'
+        elif level < 0.35:
+            icon_name = 'audio-volume-low-symbolic'
+        elif level < 0.70:
+            icon_name = 'audio-volume-medium-symbolic'
+        else:
+            icon_name = 'audio-volume-high-symbolic'
         params = {
             'icon': GLib.Variant('s', icon_name),
             'label': GLib.Variant('s', 'Volumen'),
@@ -205,18 +265,38 @@ def show_volume_osd(vol, is_muted=False):
     except Exception:
         pass
 
-def adjust_volume(up=True):
+def get_pipewire_volume():
     try:
-        delta = "5%+" if up else "5%-"
-        cmd = f"XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ {delta} 2>/dev/null || wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ {delta} 2>/dev/null || amixer set Master {delta} 2>/dev/null"
-        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        res = subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null", shell=True, capture_output=True, text=True)
+        res = subprocess.run(
+            "XDG_RUNTIME_DIR=/tmp/runtime-root wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null",
+            shell=True, capture_output=True, text=True
+        )
         out = res.stdout.strip()
+        is_muted = "[MUTED]" in out
         parts = out.split()
         if len(parts) >= 2:
-            vol = float(parts[1])
-            is_muted = "[MUTED]" in out
-            show_volume_osd(vol, is_muted)
+            return float(parts[1]), is_muted
+    except Exception:
+        pass
+    return 0.5, False
+
+def adjust_volume(up=True):
+    try:
+        vol, is_muted = get_pipewire_volume()
+        if up:
+            subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null", shell=True)
+            if vol <= 0.05 or is_muted:
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.15 2>/dev/null", shell=True)
+            else:
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null", shell=True)
+        else:
+            if vol <= 0.08:
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.0 2>/dev/null", shell=True)
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>/dev/null", shell=True)
+            else:
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null", shell=True)
+        vol, is_muted = get_pipewire_volume()
+        show_volume_osd(vol, is_muted)
     except Exception as e:
         print(f"[-] Error ajustando volumen: {e}", flush=True)
 
@@ -274,10 +354,10 @@ def start_dbus_services():
         global saved_backlight_level
         if method == "SetBrightness":
             sub, dev, val = params.unpack()
-            val_int = int(val)
-            set_backlight_hardware(val_int)
-            if val_int > 5:
-                saved_backlight_level = val_int
+            val_int = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, int(val)))
+            saved_backlight_level = val_int
+            if is_screen_on:
+                set_backlight_hardware(val_int)
             invocation.return_value(None)
         elif method == "GetSession":
             invocation.return_value(GLib.Variant('(o)', ('/org/freedesktop/login1/session/auto',)))
@@ -292,10 +372,12 @@ def start_dbus_services():
             sleep_tablet()
             invocation.return_value(None)
         elif method == "PowerOff":
-            print("[*] DBus login1.Manager.PowerOff llamado (ignorado para estabilidad de depuración)", flush=True)
+            print("[*] DBus login1.Manager.PowerOff llamado!", flush=True)
+            subprocess.call("sync; poweroff", shell=True)
             invocation.return_value(None)
         elif method == "Reboot":
-            print("[*] DBus login1.Manager.Reboot llamado (ignorado para estabilidad de depuración)", flush=True)
+            print("[*] DBus login1.Manager.Reboot llamado!", flush=True)
+            subprocess.call("sync; reboot", shell=True)
             invocation.return_value(None)
         else:
             invocation.return_value(None)
@@ -328,7 +410,6 @@ def start_dbus_services():
             None
         )
 
-    # 2. net.hadess.SensorProxy para rotación en Phosh
     SENSOR_XML = '''
     <node>
       <interface name="net.hadess.SensorProxy">
@@ -361,11 +442,7 @@ def start_dbus_services():
                 )
             except Exception:
                 pass
-        try:
-            cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
-            subprocess.call(cmd, shell=True)
-        except Exception:
-            pass
+        ensure_desired_orientation(force=True)
 
     def handle_sensor_method(conn, sender, path, iface, method, params, invocation):
         if method == "SetOrientation":
@@ -403,7 +480,6 @@ def start_dbus_services():
     except Exception as e:
         print(f"[-] Error registrando net.hadess.SensorProxy: {e}", flush=True)
 
-    # 3. org.gnome.SessionManager en el Session Bus
     SESSION_XML = '''
     <node>
       <interface name="org.gnome.SessionManager">
@@ -425,10 +501,12 @@ def start_dbus_services():
 
     def handle_session_method(conn, sender, path, iface, method, params, invocation):
         if method == "Shutdown":
-            print("[*] SessionManager.Shutdown recibido (ignorado para estabilidad)", flush=True)
+            print("[*] SessionManager.Shutdown llamado!", flush=True)
+            subprocess.call("sync; poweroff", shell=True)
             invocation.return_value(None)
         elif method == "Reboot":
-            print("[*] SessionManager.Reboot recibido (ignorado para estabilidad)", flush=True)
+            print("[*] SessionManager.Reboot llamado!", flush=True)
+            subprocess.call("sync; reboot", shell=True)
             invocation.return_value(None)
         elif method == "CanShutdown":
             invocation.return_value(GLib.Variant('(b)', (True,)))
@@ -449,12 +527,11 @@ def start_dbus_services():
     except Exception as e:
         print(f"[-] Error registrando org.gnome.SessionManager: {e}", flush=True)
 
-    # 4. Listener de desbloqueo para mantener 180°
     def on_screensaver_signal(conn, sender, path, iface, signal, params):
         if signal == "ActiveChanged":
             is_active = params.unpack()[0]
             if not is_active:
-                ensure_desired_orientation()
+                ensure_desired_orientation(force=False)
 
     try:
         session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -492,7 +569,10 @@ def get_grabbed_devices():
     return devs
 
 def main():
-    print("[+] tablet_power_daemon: Iniciando controlador de botón Power y suspensión...", flush=True)
+    print("[+] tablet_power_daemon v2: Iniciando controlador de botón Power, Volumen, Brillo y Suspensión...", flush=True)
+    release_static_backlight_locks()
+    set_backlight_hardware(saved_backlight_level)
+
     try:
         subprocess.call("HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null", shell=True)
     except Exception:
@@ -502,16 +582,17 @@ def main():
     t.start()
 
     devs = get_grabbed_devices()
-    ensure_desired_orientation()
 
-    last_check_orient = time.time()
+    last_check_hw = time.time()
 
     while True:
         now = time.time()
-        if now - last_check_orient > 3.0:
-            last_check_orient = now
+        if now - last_check_hw > 2.0:
+            last_check_hw = now
             if is_screen_on:
-                ensure_desired_orientation()
+                cur_b = get_current_backlight()
+                if cur_b < MIN_SAFE_BRIGHTNESS or cur_b > MAX_SAFE_BRIGHTNESS:
+                    set_backlight_hardware(saved_backlight_level)
 
         if not devs:
             time.sleep(1)
@@ -531,8 +612,8 @@ def main():
                     continue
                 sec, usec, etype, code, val = struct.unpack(EVENT_FORMAT, data)
 
-                if etype == EV_KEY and val == 1:
-                    if code == KEY_POWER:
+                if etype == EV_KEY and val in (1, 2):
+                    if code == KEY_POWER and val == 1:
                         toggle_screen_power()
                     elif code == KEY_VOLUMEUP:
                         adjust_volume(up=True)

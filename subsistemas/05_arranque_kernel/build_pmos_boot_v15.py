@@ -193,6 +193,18 @@ def prepare_initramfs_v9(output_gz_path):
             copied += 1
     print(f"  Módulos copiados: {copied}  |  Omitidos (blacklist): {skipped}")
 
+    repo_dir = "/home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES"
+    mali_patched = os.path.join(repo_dir, "subsistemas/06_aceleracion_grafica_gpu/mali_kbase_mt6789_patched.ko")
+    if os.path.exists(mali_patched):
+        shutil.copy2(mali_patched, os.path.join(target_krel_dir, "mali_kbase_mt6789.ko"))
+        print(f"  [+] mali_kbase_mt6789_patched.ko embebido en initramfs ({os.path.getsize(mali_patched):,} bytes)")
+
+    tddi_patched = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/tddi_9551_patched.ko")
+    if os.path.exists(tddi_patched):
+        shutil.copy2(tddi_patched, os.path.join(target_krel_dir, "tddi_9551.ko"))
+        shutil.copy2(tddi_patched, os.path.join(target_mod_dir, "tddi_9551_patched.ko"))
+        print(f"  [+] tddi_9551_patched.ko embebido en initramfs ({os.path.getsize(tddi_patched):,} bytes)")
+
 
     # Copiar firmwares oficiales (Chipone TDDI y Wi-Fi) al initramfs
     target_fw_dir = os.path.join(workdir, "lib/firmware")
@@ -513,7 +525,21 @@ fi
         os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
         shutil.copy2(sph_src, os.path.join(workdir, "bin", "start_phosh.sh"))
         os.chmod(os.path.join(workdir, "bin", "start_phosh.sh"), 0o755)
-        print(f"  [+] start_phosh.sh instalado en initramfs (con GPU Mali y sin cargador I2C)")
+        print(f"  [+] start_phosh.sh instalado en initramfs (con GPU Mali y todos los subsistemas)")
+
+    pwrap_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/phosh_wrapper.sh")
+    if os.path.exists(pwrap_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(pwrap_src, os.path.join(workdir, "bin", "phosh_wrapper.sh"))
+        os.chmod(os.path.join(workdir, "bin", "phosh_wrapper.sh"), 0o755)
+        print(f"  [+] phosh_wrapper.sh instalado en initramfs")
+
+    upower_prov_src = os.path.join(repo_dir, "subsistemas/02_bateria_energia/upower_battery_provider.py")
+    if os.path.exists(upower_prov_src):
+        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
+        shutil.copy2(upower_prov_src, os.path.join(workdir, "bin", "upower_battery_provider.py"))
+        os.chmod(os.path.join(workdir, "bin", "upower_battery_provider.py"), 0o755)
+        print(f"  [+] upower_battery_provider.py instalado en initramfs")
 
     bat_daemon_src = os.path.join(repo_dir, "subsistemas/02_bateria_energia/battery_daemon")
     if os.path.exists(bat_daemon_src):
@@ -1186,6 +1212,10 @@ for m in \
     aw37503 mtk_panel_ext panel-dk068h5gq-dsi-vdo panel-l0a9w006c-dsi-vdo pwm-mtk-disp \
     leds-mtk leds-mtk-disp leds-mtk-pwm mediatek-drm \
     mtk-pmic-keys mtk-kpd tddi_9551 \
+    nvmem-mt635x-efuse mtk-afe-external scp adsp mtk-scp-audiocommon audio_ipi \
+    snd-soc-audiodsp-common mtk-scp-audio mtk-sp-spk-amp snd-soc-mtk-common \
+    mtk-scp-ultra snd-soc-mtk-scp-ultra snd-soc-aw87xxx snd-soc-mt6789-afe \
+    mt6358-accdet mtk-btcvsd snd-soc-mt6366 mt6789-mt6366 \
     cfg80211 connadp ccci_util_lib ccci_auxadc ccmni mtk_pbm mtk_mdpm ccci_md_all \
     btif_drv wmt_drv; do
     load_mod "$m.ko"
@@ -1217,8 +1247,19 @@ if [ -x /bin/wmt_wifi_start.sh ]; then
 fi
 
 
-# Poblar nodos de entrada
+# Poblar nodos de entrada y sonido ALSA
 mdev -s 2>/dev/null || true
+mkdir -p /dev/snd
+for d in /sys/class/sound/*; do
+    [ -e "$d" ] || continue
+    sname=$(basename "$d")
+    if [ -f "$d/dev" ]; then
+        sdev=$(cat "$d/dev" 2>/dev/null)
+        [ -n "$sdev" ] && mknod "/dev/snd/$sname" c ${sdev%%:*} ${sdev##*:} 2>/dev/null || true
+    fi
+done
+chmod 755 /dev/snd 2>/dev/null || true
+chmod 666 /dev/snd/* 2>/dev/null || true
 mkdir -p /dev/input
 for ev in /sys/class/input/event*; do
     [ -d "$ev" ] || continue
@@ -1295,9 +1336,7 @@ fi
 for b in /sys/class/leds/lcd-backlight/brightness /sys/class/backlight/*/brightness; do
     [ -f "$b" ] && echo 15 > "$b" 2>/dev/null || true
 done
-if [ -x /bin/drm_splash ]; then
-    /bin/drm_splash &
-fi
+# drm_splash deshabilitado para dejar DRM Master libre a Phoc + GPU Mali-G57
 
 # Preconfigurar KWin Output para panel DSI-1 nativo (1200x1920)
 mkdir -p /sysroot/home/danilo/.config /sysroot/root/.config 2>/dev/null || true
@@ -1437,46 +1476,28 @@ if [ -d /sysroot/usr/bin ]; then
     echo ">> [pmOS-v13] Lanzando sesion de GNOME Mobile (Phosh) supervisada..." > /dev/kmsg
     (
         sleep 2
-        # Instalar libseat_direct, libgpu_interface_driver, load_mali_chain, battery_daemon y configs de Phosh
+        # Instalar libseat_direct, libgpu_interface_driver, load_mali_chain, daemons y configs de Phosh
         cp -f /bin/libseat_direct.so /sysroot/usr/lib/libseat_direct.so 2>/dev/null || true
         cp -f /bin/libgpu_interface_driver.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
+        cp -f /bin/libgpu_interface_driver.so /sysroot/lib/libmali_shim.so 2>/dev/null || true
+        cp -f /bin/libgpu_interface_driver.so /sysroot/usr/lib/libmali_shim.so 2>/dev/null || true
         cp -f /bin/load_mali_chain.sh /sysroot/usr/bin/load_mali_chain.sh 2>/dev/null || true
         cp -f /bin/panel_pwm_force /sysroot/usr/bin/panel_pwm_force 2>/dev/null || true
         cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
         cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
+        cp -f /bin/phosh_wrapper.sh /sysroot/usr/bin/phosh_wrapper.sh 2>/dev/null || true
         cp -f /bin/battery_daemon /sysroot/usr/bin/battery_daemon 2>/dev/null || true
         cp -f /bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_battery_daemon.py 2>/dev/null || true
+        cp -f /bin/upower_battery_provider.py /sysroot/usr/bin/upower_battery_provider.py 2>/dev/null || true
         cp -f /bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
+        cp -f /bin/tablet_audio_daemon.py /sysroot/usr/local/bin/tablet_audio_daemon.py 2>/dev/null || true
+        cp -f /bin/tablet_power_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
         cp -f /etc/phoc.ini /sysroot/etc/phoc.ini 2>/dev/null || true
         mkdir -p /sysroot/etc/wireplumber/wireplumber.conf.d /sysroot/etc/pipewire/pipewire.conf.d /sysroot/usr/share/alsa-card-profile/mixer/paths
         cp -f /etc/wireplumber/50-alsa-fix.conf /sysroot/etc/wireplumber/wireplumber.conf.d/50-alsa-fix.conf 2>/dev/null || true
         cp -f /etc/pipewire/10-alsa.conf /sysroot/etc/pipewire/pipewire.conf.d/10-alsa.conf 2>/dev/null || true
         cp -f /etc/alsa-card-profile/analog-output-headphones.conf /sysroot/usr/share/alsa-card-profile/mixer/paths/analog-output-headphones.conf 2>/dev/null || true
-        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
-
-        # Habilitar carga de bateria por hardware con chip MT6375 al encender
-        for m in rtc-mt6397 led_ctrl pd_dbg_info adapter_class charger_class \
-                 mtk_charger_algorithm_class tcpc_class tcpc_mt6375 \
-                 mtk_charger_framework mt6375-charger extcon-mtk-usb \
-                 mtk_pep20 mtk_pep40 mtk_pd_charging mtk_chg_type_det \
-                 mt6358_battery mt635x_auxadc; do
-            modprobe $m 2>/dev/null || \
-            insmod /lib/modules/$m.ko 2>/dev/null || \
-            insmod /usr/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$m.ko 2>/dev/null || \
-            insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$m.ko 2>/dev/null || true
-        done
-        echo 2000000 > /sys/devices/platform/charger/input_current 2>/dev/null || true
-        echo 4 > /sys/devices/platform/charger/chr_type 2>/dev/null || true
-        CHG_DEV="/sys/devices/platform/soc/11017000.i2c/i2c-5/5-0034/11017000.i2c:mt6375@34:chg/power_supply/11017000.i2c:mt6375@34:chg"
-        if [ -d "$CHG_DEV" ]; then
-            echo 1 > $CHG_DEV/online 2>/dev/null || true
-            echo "Charging" > $CHG_DEV/status 2>/dev/null || true
-            echo 2000 > $CHG_DEV/input_current_limit 2>/dev/null || true
-            echo 2000 > $CHG_DEV/constant_charge_current 2>/dev/null || true
-        fi
-        if [ -x /sysroot/usr/bin/python3 ]; then
-            chroot /sysroot /usr/bin/python3 -u /usr/bin/tablet_battery_daemon.py >/sysroot/tmp/battery_daemon.log 2>&1 &
-        fi
+        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/phosh_wrapper.sh /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_battery_daemon.py /sysroot/usr/bin/upower_battery_provider.py /sysroot/usr/bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
 
         mkdir -p /sysroot/etc/dbus-1/system.d
         cat << 'DBUSEOF' > /sysroot/etc/dbus-1/system.d/net.hadess.SensorProxy.conf
@@ -1496,10 +1517,11 @@ DBUSEOF
         # Precalentar udev en sysroot
         chroot /sysroot udevadm trigger --action=add --subsystem-match=input 2>/dev/null || true
         chroot /sysroot udevadm settle --timeout=2 2>/dev/null || true
-        echo ">> [pmOS-Sentinel] Entorno sysroot listo y montado con éxito." > /dev/kmsg
-        echo ">> [pmOS-Sentinel] Shell remoto interactivo disponible en 172.16.42.1:2323 y /dev/ttyGS0." > /dev/kmsg
-        echo ">> [pmOS-Sentinel] Para iniciar Phosh manualmente: '/usr/bin/start_phosh_service.sh'" > /dev/kmsg
+        echo ">> [pmOS-Master] Entorno sysroot listo. Iniciando sesión Phosh acelerada por GPU con todos los subsistemas..." > /dev/kmsg
         echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+        if [ -x /bin/start_phosh_service.sh ]; then
+            /bin/start_phosh_service.sh > /sysroot/var/log/phosh_service_boot.log 2>&1 &
+        fi
     ) &
 fi
 

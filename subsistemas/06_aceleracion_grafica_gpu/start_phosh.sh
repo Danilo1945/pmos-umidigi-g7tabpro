@@ -1,75 +1,105 @@
 #!/bin/sh
 # ==============================================================================
-# Script Maestro Supervisor Phoc + Phosh Estable
-# Renderizador: Pixman (Software CPU Octa-Core Helio G99) + DRM Legacy
-# Plataforma: UMIDIGI G7 Tab Pro (TG2403GBA / MT6789)
+# Script Maestro Supervisor Integral: Phoc + Phosh + Todos los Subsistemas
+# Renderizador: GPU ARM Mali-G57 MC2 (GLES2 + libgpu_interface_driver.so + NEON)
+# Plataforma: UMIDIGI G7 Tab Pro (TG2403GBA / MediaTek Helio G99 MT6789)
 # postmarketOS Edge / Linux 5.10.185-android12 aarch64 (musl libc)
 # ==============================================================================
 
 # 1. Sanitización de procesos residuales y liberación de DRM Master
 mkdir -p /var/log /sysroot/var/log 2>/dev/null || true
-killall -9 drm_splash panel_pwm_force feedbackd callaudiod dconf-service at-spi-bus-launcher at-spi2-registryd 2>/dev/null || true
+killall -9 drm_splash panel_pwm_force feedbackd callaudiod dconf-service at-spi-bus-launcher at-spi2-registryd backlight_lock backlight_guard 2>/dev/null || true
 pkill -f "capture_touch" 2>/dev/null || true
 
-# Inhabilitar feedbackd permanentemente para evitar cuelgues de D-Bus en eventos tactiles
+# Inhabilitar feedbackd permanentemente para evitar cuelgues de D-Bus en eventos táctiles
 chmod 000 /usr/libexec/feedbackd /sysroot/usr/libexec/feedbackd 2>/dev/null || true
 rm -f /sysroot/usr/share/dbus-1/services/org.sigxcpu.Feedback.service /usr/share/dbus-1/services/org.sigxcpu.Feedback.service 2>/dev/null || true
 
-# Fijar CPU en performance en todos los núcleos
+# Fijar CPU en performance en todos los núcleos (Cortex-A76 @ 2.2 GHz + Cortex-A55 @ 2.0 GHz)
 for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
     echo performance > "$gov" 2>/dev/null || true
 done
 
-# 2. Blindaje anti-UVLO de brillo LCD permanentemente en 15/255 con escudo de bind-mount
+# 2. Liberar bind-mounts estáticos de brillo y fijar nivel inicial seguro anti-UVLO (15/255)
+umount -l /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
+umount -l /sysroot/sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
+umount -l /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
+chmod 666 /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 echo 15 > /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
-mkdir -p /run /sysroot/run 2>/dev/null || true
-echo 15 > /run/dummy_brightness 2>/dev/null || true
-echo 15 > /sysroot/run/dummy_brightness 2>/dev/null || true
-chmod 666 /run/dummy_brightness /sysroot/run/dummy_brightness 2>/dev/null || true
-mount --bind /run/dummy_brightness /sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
-mount --bind /sysroot/run/dummy_brightness /sysroot/sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness 2>/dev/null || true
+echo 15 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null || true
 
-if ! pgrep -f "backlight_guard" >/dev/null 2>&1; then
-    (
-        while true; do
-            echo 15 > /run/dummy_brightness 2>/dev/null || true
-            echo 15 > /sysroot/run/dummy_brightness 2>/dev/null || true
-            sleep 2
-        done
-    ) &
-fi
-
-# 3. Watchdog de hardware activo
+# 3. Watchdog de silicio activo
 if ! pgrep -f wdt_pet >/dev/null 2>&1; then
     [ -x /bin/wdt_pet ] && /bin/wdt_pet >/dev/null 2>&1 &
-    [ -x /sysroot/bin/wdt_pet ] && /sysroot/bin/wdt_pet >/dev/null 2>&1 &
+    [ -x /usr/bin/wdt_pet ] && /usr/bin/wdt_pet >/dev/null 2>&1 &
+    [ -x /sysroot/usr/bin/wdt_pet ] && /sysroot/usr/bin/wdt_pet >/dev/null 2>&1 &
 fi
 
-# 3.1 Cargar cadena de GPU Mali si el módulo de kernel mali_kbase no está cargado
+# 3.1 Cargar cadena de GPU Mali-G57 si el módulo mali_kbase no está cargado
 if ! grep -q "mali_kbase" /proc/modules 2>/dev/null; then
     [ -x /sysroot/usr/bin/load_mali_chain.sh ] && /sysroot/usr/bin/load_mali_chain.sh || true
     [ -x /usr/bin/load_mali_chain.sh ] && /usr/bin/load_mali_chain.sh || true
 fi
-chmod 666 /dev/mali0 /sysroot/dev/mali0 2>/dev/null || true
+chmod 666 /dev/mali0 /sysroot/dev/mali0 /dev/dma_heap/* /sysroot/dev/dma_heap/* 2>/dev/null || true
+
+# Configuración de alto rendimiento para GPU Mali-G57 (812 MHz - 1.1 GHz / OPP 15)
+if [ -d /proc/gpufreqv2 ]; then
+    echo 15 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
+fi
+for mg in /sys/class/devfreq/*.mali/governor; do
+    [ -f "$mg" ] && echo performance > "$mg" 2>/dev/null || true
+done
+for mf in /sys/class/devfreq/*.mali/min_freq; do
+    [ -f "$mf" ] && echo 812000000 > "$mf" 2>/dev/null || true
+done
 
 # 3.2 Cargar driver táctil Chipone TDDI parcheado
 if [ ! -e /dev/input/event2 ]; then
     rmmod tddi_9551 2>/dev/null || true
-    insmod /sysroot/lib/modules/tddi_9551_patched.ko 2>/dev/null || insmod /lib/modules/tddi_9551_patched.ko 2>/dev/null || true
+    insmod /sysroot/lib/modules/tddi_9551_patched.ko 2>/dev/null || \
+    insmod /lib/modules/tddi_9551_patched.ko 2>/dev/null || \
+    insmod /lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/tddi_9551.ko 2>/dev/null || true
     mdev -s 2>/dev/null || true
 fi
+
+# 3.3 Cargar cadena de módulos ALSA Audio (MT6789 AFE + MT6366 + 4x AW87359) si no hay tarjeta registrada
+if ! grep -q "mt6789" /proc/asound/cards 2>/dev/null; then
+    for am in nvmem-mt635x-efuse mtk-afe-external scp adsp mtk-scp-audiocommon audio_ipi \
+              snd-soc-audiodsp-common mtk-scp-audio mtk-sp-spk-amp snd-soc-mtk-common \
+              mtk-scp-ultra snd-soc-mtk-scp-ultra snd-soc-aw87xxx snd-soc-mt6789-afe \
+              mt6358-accdet mtk-btcvsd snd-soc-mt6366 mt6789-mt6366; do
+        modprobe "$am" 2>/dev/null || \
+        insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$am.ko" 2>/dev/null || \
+        insmod "/sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$am.ko" 2>/dev/null || \
+        insmod "/lib/modules/$am.ko" 2>/dev/null || true
+    done
+fi
+mkdir -p /dev/snd /sysroot/dev/snd 2>/dev/null || true
+for d in /sys/class/sound/*; do
+    [ -e "$d" ] || continue
+    sname=$(basename "$d")
+    if [ -f "$d/dev" ]; then
+        sdev=$(cat "$d/dev")
+        smaj=${sdev%%:*}
+        smin=${sdev##*:}
+        mknod "/dev/snd/$sname" c "$smaj" "$smin" 2>/dev/null || true
+        mknod "/sysroot/dev/snd/$sname" c "$smaj" "$smin" 2>/dev/null || true
+    fi
+done
+chmod 755 /dev/snd /sysroot/dev/snd 2>/dev/null || true
+chmod 666 /dev/snd/* /sysroot/dev/snd/* 2>/dev/null || true
 
 # 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
 mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
 if ! grep -q ' /dev/shm ' /proc/mounts 2>/dev/null; then
     mount -t tmpfs -o mode=1777,size=128M shm /dev/shm 2>/dev/null || true
 fi
-if ! grep -q ' /sysroot/dev/shm ' /proc/mounts 2>/dev/null; then
+if [ -d /sysroot/dev/shm ] && ! grep -q ' /sysroot/dev/shm ' /proc/mounts 2>/dev/null; then
     mount -t tmpfs -o mode=1777,size=128M shm /sysroot/dev/shm 2>/dev/null || true
 fi
 chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 
-# 5. Permisos y metadatos de dispositivos
+# 5. Permisos y metadatos udev de dispositivos de entrada (calibración 1:1 para rotación 180°)
 chmod 666 /dev/dri/* /sysroot/dev/dri/* 2>/dev/null || true
 chmod 666 /dev/input/* /sysroot/dev/input/* 2>/dev/null || true
 
@@ -110,7 +140,9 @@ cp -f /etc/udev/rules.d/99-touchscreen.rules /sysroot/etc/udev/rules.d/99-touchs
 
 # 6. Configuración de phoc.ini (rotación 180° y deshabilitar Writeback)
 mkdir -p /etc /sysroot/etc
-cat << 'PHOCEOF' > /sysroot/etc/phoc.ini
+PHOC_INI_TARGET="/etc/phoc.ini"
+[ -d /sysroot/etc ] && PHOC_INI_TARGET="/sysroot/etc/phoc.ini"
+cat << 'PHOCEOF' > "$PHOC_INI_TARGET"
 [core]
 xwayland=false
 
@@ -126,16 +158,13 @@ enable=false
 [output:Writeback-2]
 enable=false
 PHOCEOF
-cp -f /sysroot/etc/phoc.ini /etc/phoc.ini 2>/dev/null || true
+[ -f /sysroot/etc/phoc.ini ] && cp -f /sysroot/etc/phoc.ini /etc/phoc.ini 2>/dev/null || true
 
-# Configuración de alto rendimiento para GPU Mali-G57 (812 MHz - OPP 15)
-if [ -d /proc/gpufreqv2 ]; then
-    echo 15 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
-fi
-
-# 7. Creación de phosh_wrapper.sh con entorno Wayland completo y renderizado por software seguro
+# 7. Creación de phosh_wrapper.sh con aceleración GPU nativa (GSK_RENDERER=gl) y 60 FPS
 mkdir -p /usr/bin /sysroot/usr/bin
-cat << 'WRAPPEREOF' > /sysroot/usr/bin/phosh_wrapper.sh
+WRAPPER_TARGET="/usr/bin/phosh_wrapper.sh"
+[ -d /sysroot/usr/bin ] && WRAPPER_TARGET="/sysroot/usr/bin/phosh_wrapper.sh"
+cat << 'WRAPPEREOF' > "$WRAPPER_TARGET"
 #!/bin/sh
 unset LD_PRELOAD
 export HOME=/root
@@ -149,10 +178,11 @@ export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
 
-# Forzar renderizado Cairo por software para GTK3/Phosh (evita tocar Mali)
-export GDK_RENDERING=similar
-export GDK_GL=never
-export GSK_RENDERER=cairo
+# Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
+export GSK_RENDERER=gl
+unset GDK_GL
+unset GDK_RENDERING
+unset GDK_DISABLE
 
 # 1. Esperar disponibilidad del socket Wayland de Phoc
 count=0
@@ -173,21 +203,31 @@ while [ $count -lt 80 ]; do
 done
 sleep 0.5
 
-# 3. Configuraciones de energia seguras para GNOME y desactivacion de animaciones para respuesta tactil instantanea
+# 3. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
 gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
-gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
+gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
+dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-echo "[wrapper] Lanzando sesion GNOME Mobile Phosh..." >> /var/log/phosh_user.log
+# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+if ! pgrep -x squeekboard >/dev/null 2>&1; then
+    /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
+fi
+
+echo "[wrapper] Lanzando sesion GNOME Mobile Phosh con aceleracion GPU completa..." >> /var/log/phosh_user.log
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
 WRAPPEREOF
-chmod 755 /sysroot/usr/bin/phosh_wrapper.sh
-cp -f /sysroot/usr/bin/phosh_wrapper.sh /usr/bin/phosh_wrapper.sh 2>/dev/null || true
+chmod 755 "$WRAPPER_TARGET"
+[ -f /sysroot/usr/bin/phosh_wrapper.sh ] && cp -f /sysroot/usr/bin/phosh_wrapper.sh /usr/bin/phosh_wrapper.sh 2>/dev/null || true
 
 # 8. Autoejecución en entorno chroot de postmarketOS si se invoca desde initramfs
 if [ ! -f /usr/bin/phoc ] && [ -f /sysroot/usr/bin/phoc ]; then
+    # Si el Wi-Fi aún no se ha levantado desde el initramfs, dispararlo en segundo plano
+    if ! ip link show wlan0 >/dev/null 2>&1; then
+        [ -x /bin/wmt_wifi_start.sh ] && /bin/wmt_wifi_start.sh >/tmp/wmt_wifi_init.log 2>&1 &
+    fi
     grep -q ' /sysroot/proc ' /proc/mounts || mount -t proc proc /sysroot/proc 2>/dev/null || true
     grep -q ' /sysroot/sys ' /proc/mounts || mount -t sysfs sysfs /sysroot/sys 2>/dev/null || true
     grep -q ' /sysroot/dev ' /proc/mounts || mount --bind /dev /sysroot/dev 2>/dev/null || true
@@ -199,14 +239,17 @@ if [ ! -f /usr/bin/phoc ] && [ -f /sysroot/usr/bin/phoc ]; then
     grep -q ' /sysroot/dev/shm ' /proc/mounts || mount -t tmpfs -o mode=1777,size=128M shm /sysroot/dev/shm 2>/dev/null || true
     chmod 755 /dev/input /sysroot/dev/input 2>/dev/null || true
     chmod 666 /dev/input/* /sysroot/dev/input/* 2>/dev/null || true
+    cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
     exec chroot /sysroot /usr/bin/start_phosh.sh "$@"
 fi
 
-# 9. Entorno Wayland y variables de ejecución dentro de chroot
+# ==============================================================================
+# DENTRO DEL CHROOT (/sysroot): INICIO DE TODOS LOS SUBSISTEMAS Y DEMONIOS
+# ==============================================================================
 chmod 755 /dev/input 2>/dev/null || true
-chmod 666 /dev/input/* 2>/dev/null || true
+chmod 666 /dev/input/* /dev/dri/* /dev/mali0 2>/dev/null || true
 
-mkdir -p /tmp/runtime-root
+mkdir -p /tmp/runtime-root /var/log /run/dbus /var/run/dbus
 chmod 700 /tmp/runtime-root 2>/dev/null || true
 
 export HOME=/root
@@ -214,22 +257,79 @@ export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# 10. Renderizador Estable Acelerado por GPU GLES2 (ARM Mali-G57)
+# 9. Asegurar udevd y D-Bus System Bus activos
+if ! pgrep -x udevd >/dev/null 2>&1; then
+    /usr/bin/udevd --daemon 2>/dev/null || /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
+fi
+if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
+    rm -f /run/dbus/dbus.pid /var/run/dbus/dbus.pid 2>/dev/null || true
+    dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+# 10. Subsistema 04: Conectividad Wi-Fi (wpa_supplicant + NetworkManager)
+if ip link show wlan0 >/dev/null 2>&1; then
+    ip link set wlan0 up 2>/dev/null || true
+fi
+if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+    mkdir -p /etc/wpa_supplicant /run/wpa_supplicant 2>/dev/null || true
+    [ ! -f /etc/wpa_supplicant/wpa_supplicant.conf ] && printf "ctrl_interface=/run/wpa_supplicant\nctrl_interface_group=0\nupdate_config=1\n" > /etc/wpa_supplicant/wpa_supplicant.conf
+    /usr/sbin/wpa_supplicant -u -B -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
+fi
+if ! pgrep -x NetworkManager >/dev/null 2>&1; then
+    /usr/sbin/NetworkManager 2>/dev/null &
+fi
+
+# 11. Subsistema 02: Batería, Telemetría ADC/OCV y Proveedor UPower
+for bm in mt635x_auxadc mt6358_battery; do
+    modprobe "$bm" 2>/dev/null || insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$bm.ko" 2>/dev/null || true
+done
+if [ -f /usr/bin/upower_battery_provider.py ] && ! pgrep -f upower_battery_provider.py >/dev/null 2>&1; then
+    killall -9 upowerd 2>/dev/null || true
+    python3 -u /usr/bin/upower_battery_provider.py > /var/log/upower_provider.log 2>&1 &
+elif [ -f /usr/bin/tablet_battery_daemon.py ] && ! pgrep -f tablet_battery_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/bin/tablet_battery_daemon.py > /var/log/battery_daemon.log 2>&1 &
+fi
+
+# 12. Subsistema 01: Audio (PipeWire + WirePlumber + 4x Amplificadores AW87359)
+rm -f /etc/pipewire/pipewire.conf.d/00-disable-portal.conf /etc/pipewire/pipewire.conf.d/10-null.conf 2>/dev/null || true
+if ! pgrep -x pipewire >/dev/null 2>&1; then
+    rm -f /tmp/runtime-root/pipewire-0*.lock /tmp/runtime-root/pulse/native* 2>/dev/null || true
+    XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/pipewire > /var/log/pipewire.log 2>&1 &
+    sleep 0.3
+fi
+if ! pgrep -x wireplumber >/dev/null 2>&1; then
+    XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/wireplumber > /var/log/wireplumber.log 2>&1 &
+fi
+if ! pgrep -x pipewire-pulse >/dev/null 2>&1; then
+    XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/pipewire-pulse > /var/log/pipewire-pulse.log 2>&1 &
+fi
+if [ -f /usr/bin/tablet_audio_daemon.py ] && ! pgrep -f tablet_audio_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/bin/tablet_audio_daemon.py > /var/log/tablet_audio.log 2>&1 &
+elif [ -f /usr/local/bin/tablet_audio_daemon.py ] && ! pgrep -f tablet_audio_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/local/bin/tablet_audio_daemon.py > /var/log/tablet_audio.log 2>&1 &
+fi
+
+# 13. Subsistema 03: Botón Físico Power, Suspensión D-Bus login1, Brillo y Volumen
+HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
+if [ -f /usr/bin/tablet_power_daemon.py ] && ! pgrep -f tablet_power_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/bin/tablet_power_daemon.py > /var/log/tablet_power.log 2>&1 &
+    for i in $(seq 1 25); do
+        if gdbus call --system --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.freedesktop.login1 >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
+# 14. Variables de entorno Wayland y Renderizador GPU GLES2 (ARM Mali-G57)
 export WLR_RENDERER=gles2
 export WLR_RENDERER_ALLOW_SOFTWARE=0
 export WLR_BACKENDS=drm,libinput
 export WLR_DRM_DEVICES=/dev/dri/card0
-# export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_NO_HARDWARE_CURSORS=1
 export WLR_DRM_NO_MODIFIERS=1
 export WLR_DRM_NO_ATOMIC=1
 
-# Asegurar que udev esté activo para DRM/KMS y dispositivos de entrada
-if ! pgrep -x udevd >/dev/null 2>&1; then
-    /usr/bin/udevd --daemon 2>/dev/null || /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
-fi
-
-# 11. Variables de integración para clientes Wayland
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
 export SDL_VIDEODRIVER=wayland
@@ -238,26 +338,14 @@ export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export MOZ_ENABLE_WAYLAND=1
 
-# 12. D-Bus de sistema
-mkdir -p /run/dbus /var/run/dbus
-if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
-    dbus-daemon --system --fork 2>/dev/null || true
-fi
-
-# Desactivar plugins de energia de GNOME para blindaje absoluto de backlight
-gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
-gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
-gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
-gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
-
-# 13. Cadena LD_PRELOAD para Aceleración GPU Mali Valhall
 PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so"
 unset LD_PRELOAD
 
-# 14. Supervisor de Phoc + Phosh Acelerado por Hardware
-echo "[supervisor] Iniciando Phoc con Mali GPU + Phosh en pantalla DSI-1..." >> /var/log/phosh_supervisor.log
-rm -f $XDG_RUNTIME_DIR/wayland-* 2>/dev/null || true
-echo 15 > /run/dummy_brightness 2>/dev/null || true
-echo 15 > /sysroot/run/dummy_brightness 2>/dev/null || true
-
-exec dbus-run-session -- env LD_PRELOAD="$PHOC_PRELOAD" /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/bin/phosh_wrapper.sh" >> /var/log/phosh_gpu.log 2>&1
+# 15. Bucle Supervisor de Alta Disponibilidad para Phoc + Phosh Acelerado por GPU
+while true; do
+    echo "[supervisor] Iniciando Phoc con GPU Mali-G57 + Phosh en pantalla DSI-1..." >> /var/log/phosh_supervisor.log
+    rm -f $XDG_RUNTIME_DIR/wayland-* 2>/dev/null || true
+    dbus-run-session -- env LD_PRELOAD="$PHOC_PRELOAD" /usr/bin/phoc -v -S -C /etc/phoc.ini -E "/usr/bin/phosh_wrapper.sh" >> /var/log/phosh_gpu.log 2>&1
+    echo "[supervisor] Phoc finalizó (código $?). Reiniciando sesión en 2 segundos..." >> /var/log/phosh_supervisor.log
+    sleep 2
+done

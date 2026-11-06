@@ -99,8 +99,8 @@ def calc_soc(vbat_uv, ibat_ua):
     return 50
 
 def play_sound(snd_path):
-    cmd = f"XDG_RUNTIME_DIR=/tmp/runtime-danilo pw-play {snd_path} >/dev/null 2>&1"
-    subprocess.Popen(["su", "danilo", "-c", cmd])
+    cmd = f"XDG_RUNTIME_DIR=/tmp/runtime-root pw-play {snd_path} >/dev/null 2>&1 || su danilo -c 'XDG_RUNTIME_DIR=/tmp/runtime-danilo pw-play {snd_path}' >/dev/null 2>&1"
+    subprocess.Popen(cmd, shell=True)
 
 def bind_mount_if_needed(target, source):
     try:

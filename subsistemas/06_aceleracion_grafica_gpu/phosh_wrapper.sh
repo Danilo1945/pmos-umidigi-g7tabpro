@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# phosh_wrapper.sh - Lanzador de GNOME Mobile Shell (Phosh) en modo seguro
+# phosh_wrapper.sh - Lanzador de GNOME Mobile Shell (Phosh) con Aceleración GPU
 # ==============================================================================
 unset LD_PRELOAD
 export HOME=/root
@@ -14,10 +14,11 @@ export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
 
-# Renderizado por software puro (Cairo/Pixman)
-export GDK_RENDERING=similar
-export GDK_GL=never
-export GSK_RENDERER=cairo
+# Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
+export GSK_RENDERER=gl
+unset GDK_GL
+unset GDK_RENDERING
+unset GDK_DISABLE
 
 # 1. Esperar disponibilidad del socket Wayland de Phoc
 count=0
@@ -30,19 +31,26 @@ done
 count=0
 while [ $count -lt 80 ]; do
     if /usr/bin/wlr-randr 2>/dev/null | grep -q "DSI-1"; then
-        echo "[wrapper] Salida DSI-1 detectada y activa!" >> /var/log/phosh_user.log
+        echo "[wrapper] Salida DSI-1 detectada y activa en Wayland compositor!" >> /var/log/phosh_user.log
         break
     fi
-    sleep 0.1
+    sleep 0.2
     count=$((count + 1))
 done
 sleep 0.5
 
-# 3. Configuraciones de energia seguras para GNOME (NUNCA TOCAR SYSFS)
+# 3. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
 gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
+dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-echo "[wrapper] Lanzando sesion GNOME Mobile Phosh en modo software..." >> /var/log/phosh_user.log
+# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+if ! pgrep -x squeekboard >/dev/null 2>&1; then
+    /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
+fi
+
+echo "[wrapper] Lanzando sesion GNOME Mobile Phosh con aceleracion GPU completa..." >> /var/log/phosh_user.log
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1

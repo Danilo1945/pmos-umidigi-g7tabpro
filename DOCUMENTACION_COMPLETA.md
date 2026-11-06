@@ -2,9 +2,9 @@
 ## UMIDIGI G7 Tab Pro (`TG2403GBA`) - SoC MediaTek Helio G99 (`MT6789`)
 ### postmarketOS Edge (Kernel 5.10.185-pmos aarch64 - Alpine Linux musl)
 
-**Versión:** v15.0 Estable  
-**Fecha de Actualización:** 2026-10-08  
-**Estado General:** 100% Operativo (Auto-boot en frío, Phosh Wayland, Touch, Audio 4x AW87359, WiFi WMT, Batería 2A con telemetría en vivo, Botón físico de bloqueo/energía, Menú de suspensión D-Bus login1 y GPU Mali-G57 activa).
+**Versión:** v16.0 Master Unificada  
+**Fecha de Actualización:** 2026-11-05  
+**Estado General:** 100% Operativo (Auto-boot en frío, Phosh Wayland acelerado por hardware GPU Mali-G57 MC2 a 60 FPS (`WLR_RENDERER=gles2`, `GSK_RENDERER=gl`, `libgpu_interface_driver.so`), Touch 1:1 `tddi_9551_patched.ko`, Audio 4x AW87359 + Jack 3.5mm, WiFi WMT, Batería 2A con telemetría UPower en vivo, Botón físico de bloqueo/energía y Menú de suspensión D-Bus login1).
 
 ---
 
@@ -16,13 +16,13 @@
 | **PMIC Principal** | MediaTek MT6366 / MT6358 | Audio DAC, Fuel Gauge (`mt6358-gauge`), RTC, Buck/LDO |
 | **Sub-PMIC / Cargador** | MediaTek MT6375 | USB Type-C, negociación USB-PD / PE+, carga rápida 2A |
 | **Pantalla** | LCD IPS 11" (1200x1920), MIPI-DSI | `mediatek_drm` (`/dev/dri/card0`), salida `DSI-1` rotada 180° |
-| **Digitalizador Táctil** | Chipone TDDI I2C (`tddi_9551`) | `/dev/input/event1` (`chipone_tddi`) y `event2` (Stylus pen) |
+| **Digitalizador Táctil** | Chipone TDDI I2C (`tddi_9551_patched.ko`) | `/dev/input/event1` (`chipone_tddi`, matriz `-1 0 1 0 -1 1`) y `event2` (Stylus pen) |
 | **Audio Analógico** | 4x Awinic AW87359 (Clase K analógica) | Buses I2C 6 y 7 (`0x58`, `0x59`) alimentados por DAC MT6366 |
 | **Wi-Fi / BT** | MediaTek MT6631 / MT6635 (802.11ac dual band) | Bus WMT / STP, interfaz `wlan0` gestionada por NetworkManager |
-| **GPU 3D** | ARM Mali-G57 MC2 (Valhall v9 JM r32p1) | `/dev/mali0`, `mali_kbase_mt6789.ko`, OPP 37 (390MHz @ 575mV) |
-| **Batería** | Celda Li-Po 7500 mAh (3.85V nom, 4.40V máx) | Curva OCV $R_{int}=85\text{ m}\Omega$, telemetría ADC en vivo |
+| **GPU 3D** | ARM Mali-G57 MC2 (Valhall v9 JM r32p1) | `/dev/mali0`, `mali_kbase_mt6789_patched.ko`, `libgpu_interface_driver.so`, OPP 15 (812MHz) / OPP 37 (390MHz) |
+| **Batería** | Celda Li-Po 7500 mAh (3.85V nom, 4.40V máx) | Curva OCV $R_{int}=85\text{ m}\Omega$, telemetría ADC en vivo + `upower_battery_provider.py` |
 | **Kernel & SO** | Kernel 5.10.185-android12-9-dirty | postmarketOS Edge (Alpine Linux aarch64 musl libc) |
-| **Entorno Gráfico** | Phosh Mobile Desktop sobre Phoc compositor | Wayland / wlroots, acelerado con bypass `libseat_direct.so` |
+| **Entorno Gráfico** | Phosh Mobile Desktop sobre Phoc compositor | Wayland / wlroots (`WLR_RENDERER=gles2`, `GSK_RENDERER=gl`, SIMD NEON x8) |
 
 ---
 
@@ -51,16 +51,18 @@ La tablet inicia en frío automáticamente en **~12 segundos** directo al entorn
                      │
                      ▼
    [ Entorno Chroot /sysroot: start_phosh.sh ]
-     ├─ Configura memoria compartida /dev/shm en chroot
+     ├─ Configura memoria compartida /dev/shm y carga cadena Mali GPU (812 MHz)
      ├─ Inicializa D-Bus System Bus (/run/dbus/system_bus_socket)
-     ├─ Inicia tablet_power_daemon.py (D-Bus login1 + captura evdev)
-     ├─ Inicia tablet_battery_daemon.py (telemetría ADC + UPower)
-     ├─ Inicia tablet_audio_daemon.py (calibración ALSA + PipeWire)
+     ├─ Inicia wmt_wifi_start.sh + wpa_supplicant + NetworkManager
+     ├─ Inicia upower_battery_provider.py + tablet_battery_daemon.py
+     ├─ Inicia pipewire + wireplumber + pipewire-pulse + tablet_audio_daemon.py
+     ├─ Inicia tablet_power_daemon.py (D-Bus login1 + captura evdev + brillo seguro)
      ├─ Espera confirmación D-Bus de org.freedesktop.login1
-     ├─ Inicia teclado en pantalla squeekboard
-     └─ Lanza compositor gráfico:
-        LD_PRELOAD=/usr/lib/libseat_direct.so dbus-run-session \
-        phoc -v -S -C /etc/phoc.ini -E "/usr/libexec/phosh -U"
+     └─ Lanza compositor gráfico supervisado:
+        WLR_RENDERER=gles2 \
+        LD_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so" \
+        dbus-run-session phoc -C /etc/phoc.ini -E "/usr/bin/phosh_wrapper.sh"
+        (phosh_wrapper.sh exporta GSK_RENDERER=gl, activa animaciones y lanza squeekboard + phosh)
 ```
 
 ### Imágenes de Arranque Flasheadas Persistentes
@@ -126,14 +128,14 @@ El control de energía del sistema está centralizado en el demonio de hardware 
 
 | Subsistema | Estado | Implementación y Verificación |
 | :--- | :--- | :--- |
-| **Pantalla e Interfaz** | ✅ **100% Operativo** | Phoc + Phosh Wayland 1200x1920 rotación 180°, escala 2, compositor acelerado con bypass `libseat_direct.so` (`DRM_IOCTL_SET_MASTER`). |
-| **Touch y Entrada** | ✅ **100% Operativo** | Chipone TDDI multitáctil (`/dev/input/event1`), Stylus pen (`event2`), teclado virtual `squeekboard` auto-iniciado. |
-| **Botón Power y Suspensión** | ✅ **100% Operativo** | Captura exclusiva `EVIOCGRAB` en `event3`, suspensión táctil D-Bus `login1.Manager`, reposo profundo < 80 mA y wake instantáneo a 180°. |
-| **Audio y Volumen** | ✅ **100% Operativo** | ALSA MT6789 AFE + 4x amplificadores AW87359 (I2C 6/7) vía DAC MT6366, PipeWire configurado en S16LE/48kHz/RW_INTERLEAVED, ganancias nominales calibradas a 32768/12 sin siseo, control de volumen físico y OSD gráfico. |
-| **Batería y Carga Rápida** | ✅ **100% Operativo** | Carga rápida 2A activa en PMIC MT6375, telemetría ADC en vivo (`BATADC`), porcentaje OCV con compensación IR calibrada para 7500mAh, rayo de carga (`battery-full-charging-symbolic`) en Phosh. |
-| **Wi-Fi 802.11ac** | ✅ **100% Operativo** | Chip MT6631 inicializado en boot mediante `wmt_init_complete` sobre protocolo WMT/STP, interfaz `wlan0` gestionada automáticamente por NetworkManager. |
-| **Arranque y Watchdog** | ✅ **100% Operativo** | Auto-boot v13 incondicional en 12s, memoria compartida `/dev/shm` tmpfs, watchdog de silicio alimentado cada 500ms por binario estático `wdt_pet`. |
-| **GPU Mali-G57 MC2** | ✅ **100% Operativo** | Silicio Valhall activo (`/dev/mali0`), OPP 37 fijado anti-brownout (390MHz @ 575mV, 153 mW), DDK ARM r32p1 con shim de compatibilidad musl libc. |
+| **Pantalla e Interfaz** | ✅ **100% Operativo** | Phoc (`WLR_RENDERER=gles2`) + Phosh (`GSK_RENDERER=gl`) 1200x1920 rotación 180°, acelerado con `libseat_direct.so` y `libgpu_interface_driver.so` (SIMD ARM NEON x8 a 60 FPS). |
+| **Touch y Entrada** | ✅ **100% Operativo** | Chipone TDDI multitáctil (`tddi_9551_patched.ko`, matriz 1:1 `-1 0 1 0 -1 1`), Stylus pen (`event2`), teclado virtual `squeekboard` auto-iniciado. |
+| **Botón Power y Suspensión** | ✅ **100% Operativo** | Captura exclusiva `EVIOCGRAB` en teclas físicas, suspensión D-Bus `login1.Manager`, escalado dinámico CPU/GPU, protección de brillo `[15, 100]` / `0` y wake instantáneo a 180°. |
+| **Audio y Volumen** | ✅ **100% Operativo** | ALSA MT6789 AFE + 4x amplificadores AW87359 (I2C 6/7) vía DAC MT6366, detección de Jack 3.5mm, PipeWire configurado en S16LE/48kHz/RW_INTERLEAVED, control de volumen físico y OSD gráfico. |
+| **Batería y Carga Rápida** | ✅ **100% Operativo** | Carga rápida 2A activa en PMIC MT6375, telemetría ADC en vivo (`BATADC`), porcentaje OCV con compensación IR calibrada para 7500mAh, servicio `upower_battery_provider.py` en Phosh. |
+| **Wi-Fi 802.11ac** | ✅ **100% Operativo** | Chip MT6631 inicializado en boot mediante `wmt_init_complete` sobre protocolo WMT/STP, interfaz `wlan0` gestionada automáticamente por `wpa_supplicant` + NetworkManager. |
+| **Arranque y Watchdog** | ✅ **100% Operativo** | Auto-boot v15/v16 incondicional en 12s, memoria compartida `/dev/shm` tmpfs, watchdog de silicio alimentado cada 500ms por binario estático `wdt_pet`. |
+| **GPU Mali-G57 MC2** | ✅ **100% Operativo** | Silicio Valhall activo (`/dev/mali0`, `mali_kbase_mt6789_patched.ko`), OPP 15 (812 MHz) en uso activo y OPP 37 (390 MHz) en reposo, DDK ARM r32p1 + `libgpu_interface_driver.so`. |
 
 ---
 
