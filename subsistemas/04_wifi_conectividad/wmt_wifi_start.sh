@@ -144,10 +144,11 @@ EOF_NM
             chroot /sysroot /usr/sbin/wpa_supplicant -u -B -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
         fi
         sleep 1
-        if ! chroot /sysroot pgrep -x NetworkManager >/dev/null 2>&1; then
-            chroot /sysroot /usr/sbin/NetworkManager 2>/dev/null &
-            sleep 1
-        fi
+        # Reiniciar NetworkManager tras inyectar /run/udev/data/n$wlan_ifidx para que lea ID_NET_DRIVER=wlan
+        chroot /sysroot killall NetworkManager 2>/dev/null || true
+        sleep 0.5
+        chroot /sysroot /usr/sbin/NetworkManager 2>/dev/null &
+        sleep 1.5
         chroot /sysroot /usr/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
     else
         mkdir -p /run/dbus /var/run/dbus 2>/dev/null || true
@@ -159,10 +160,10 @@ EOF_NM
             /usr/sbin/wpa_supplicant -u -B -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
         fi
         sleep 1
-        if ! pgrep -x NetworkManager >/dev/null 2>&1; then
-            /usr/sbin/NetworkManager 2>/dev/null &
-            sleep 1
-        fi
+        killall NetworkManager 2>/dev/null || true
+        sleep 0.5
+        /usr/sbin/NetworkManager 2>/dev/null &
+        sleep 1.5
         /usr/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
     fi
 else

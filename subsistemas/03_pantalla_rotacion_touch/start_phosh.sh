@@ -262,9 +262,15 @@ export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# 9. Asegurar udevd y D-Bus System Bus activos
+# 9. Asegurar udevd (con regla para wlan0 MT6631) y D-Bus System Bus activos
+mkdir -p /etc/udev/rules.d 2>/dev/null || true
+cat << 'EOF_UDEV_RULE' > /etc/udev/rules.d/99-mtk-wifi.rules
+SUBSYSTEM=="net", KERNEL=="wlan*", ENV{ID_NET_DRIVER}="wlan", ENV{DEVTYPE}="wlan", ENV{SYSTEMD_READY}="1", TAG+="systemd"
+EOF_UDEV_RULE
 if ! pgrep -x udevd >/dev/null 2>&1; then
     /usr/bin/udevd --daemon 2>/dev/null || /sbin/udevd --daemon 2>/dev/null || /usr/sbin/udevd --daemon 2>/dev/null || true
+else
+    udevadm control --reload-rules 2>/dev/null || true
 fi
 if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
     rm -f /run/dbus/dbus.pid /var/run/dbus/dbus.pid 2>/dev/null || true
@@ -274,6 +280,22 @@ fi
 # 10. Subsistema 04: Conectividad Wi-Fi (wpa_supplicant + NetworkManager)
 if ip link show wlan0 >/dev/null 2>&1; then
     ip link set wlan0 up 2>/dev/null || true
+    if [ -f /sys/class/net/wlan0/ifindex ]; then
+        wlan_ifidx=$(cat /sys/class/net/wlan0/ifindex 2>/dev/null)
+        mkdir -p /run/udev/data 2>/dev/null || true
+        cat << EOF_UDEV_N > "/run/udev/data/n$wlan_ifidx"
+I:243319448
+E:DEVPATH=/devices/platform/soc/18000000.wifi/net/wlan0
+E:DEVTYPE=wlan
+E:ID_NET_DRIVER=wlan
+E:IFINDEX=$wlan_ifidx
+E:INTERFACE=wlan0
+E:SUBSYSTEM=net
+E:SYSTEMD_READY=1
+E:USEC_INITIALIZED=243319448
+TAGS=:systemd:
+EOF_UDEV_N
+    fi
 fi
 if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
     mkdir -p /etc/wpa_supplicant /run/wpa_supplicant 2>/dev/null || true
