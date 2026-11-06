@@ -12,6 +12,9 @@ import struct
 import fcntl
 import array
 import subprocess
+import signal
+
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 EVENT_FORMAT = 'llHHI'
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)

@@ -12,6 +12,9 @@ import struct
 import fcntl
 import subprocess
 import threading
+import signal
+
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 EVENT_FORMAT = 'llHHI'
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
@@ -27,12 +30,15 @@ MIN_SAFE_BRIGHTNESS = 15
 MAX_SAFE_BRIGHTNESS = 100
 
 is_screen_on = True
-saved_backlight_level = 15
+saved_backlight_level = 35
 last_power_press_time = 0.0
+touch_grab_fds = []
 
 current_sensor_orientation = "bottom-up"
 sensor_dbus_conn = None
 login1_dbus_conn = None
+_cached_session_addr = None
+_cached_session_conn = None
 
 BACKLIGHT_PATHS = [
     "/sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness",
@@ -47,8 +53,20 @@ def release_static_backlight_locks():
         subprocess.run(f"chmod 666 {bp} 2>/dev/null || true", shell=True)
 
 def get_session_dbus_address():
-    if "DBUS_SESSION_BUS_ADDRESS" in os.environ and os.environ["DBUS_SESSION_BUS_ADDRESS"]:
-        return os.environ["DBUS_SESSION_BUS_ADDRESS"]
+    """Obtiene siempre la dirección D-Bus de la sesión activa de Phosh en tiempo real."""
+    # Priorizar el proceso phosh activo
+    try:
+        out = subprocess.check_output(["pidof", "phosh"], stderr=subprocess.DEVNULL).decode().strip()
+        for pid in out.split():
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                for item in f.read().split(b"\0"):
+                    if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                        addr = item.split(b"=", 1)[1].decode("utf-8")
+                        os.environ["DBUS_SESSION_BUS_ADDRESS"] = addr
+                        return addr
+    except Exception:
+        pass
+
     for p in glob.glob('/proc/[0-9]*/environ'):
         try:
             with open(p, 'rb') as f:
@@ -60,7 +78,58 @@ def get_session_dbus_address():
                     return addr
         except Exception:
             pass
-    return None
+    return os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+
+def get_phosh_session_bus():
+    """Crea o reutiliza una conexión Gio.DBusConnection directa al bus de sesión actual de Phosh."""
+    global _cached_session_addr, _cached_session_conn
+    addr = get_session_dbus_address()
+    if not addr:
+        return None
+    from gi.repository import Gio
+    if _cached_session_conn is not None and _cached_session_addr == addr and not _cached_session_conn.is_closed():
+        return _cached_session_conn
+    try:
+        flags = Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+        _cached_session_conn = Gio.DBusConnection.new_for_address_sync(addr, flags, None, None)
+        _cached_session_addr = addr
+        return _cached_session_conn
+    except Exception as e:
+        print(f"[-] Error conectando al bus de sesión ({addr}): {e}", flush=True)
+        _cached_session_conn = None
+        return None
+
+def grab_touchscreen(grab=True):
+    """Bloquea el panel táctil mientras la pantalla está apagada para evitar toques fantasma."""
+    global touch_grab_fds
+    if not grab:
+        for fd in touch_grab_fds:
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except Exception:
+                pass
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        touch_grab_fds = []
+        return
+
+    if touch_grab_fds:
+        return
+    for ev in sorted(glob.glob('/dev/input/event*')):
+        try:
+            ev_name = os.path.basename(ev)
+            name_file = f"/sys/class/input/{ev_name}/device/name"
+            if os.path.exists(name_file):
+                with open(name_file, "r") as f:
+                    dname = f.read().strip().lower()
+                if "chipone" in dname or "tddi" in dname or "fts" in dname:
+                    fd = os.open(ev, os.O_RDONLY | os.O_NONBLOCK)
+                    fcntl.ioctl(fd, EVIOCGRAB, 1)
+                    touch_grab_fds.append(fd)
+        except Exception:
+            pass
 
 def get_current_backlight():
     for bp in BACKLIGHT_PATHS:
@@ -124,34 +193,41 @@ def set_cpu_and_gpu_power(performance=True):
         pass
 
 def lock_screen():
+    """Activa el bloqueo de pantalla de Phosh (org.gnome.ScreenSaver.Lock) de forma asíncrona e instantánea."""
     try:
-        get_session_dbus_address()
-        from gi.repository import Gio
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        proxy = Gio.DBusProxy.new_sync(
-            bus, Gio.DBusProxyFlags.NONE, None,
-            'org.gnome.ScreenSaver', '/org/gnome/ScreenSaver',
-            'org.gnome.ScreenSaver', None
+        from gi.repository import Gio, GLib
+        bus = get_phosh_session_bus()
+        if not bus:
+            return
+        bus.call(
+            'org.gnome.ScreenSaver',
+            '/org/gnome/ScreenSaver',
+            'org.gnome.ScreenSaver',
+            'SetActive',
+            GLib.Variant('(b)', (True,)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            500,
+            None,
+            None
         )
-        proxy.Lock()
+        bus.call(
+            'org.gnome.ScreenSaver',
+            '/org/gnome/ScreenSaver',
+            'org.gnome.ScreenSaver',
+            'Lock',
+            None,
+            None,
+            Gio.DBusCallFlags.NONE,
+            500,
+            None,
+            None
+        )
+        print("[+] Pantalla bloqueada en Phosh (ScreenSaver.Lock).", flush=True)
     except Exception as e:
         print(f"[-] Error en ScreenSaver.Lock: {e}", flush=True)
 
-def wake_screen():
-    try:
-        get_session_dbus_address()
-        from gi.repository import Gio
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        proxy = Gio.DBusProxy.new_sync(
-            bus, Gio.DBusProxyFlags.NONE, None,
-            'org.gnome.ScreenSaver', '/org/gnome/ScreenSaver',
-            'org.gnome.ScreenSaver', None
-        )
-        proxy.SetActive('(b)', False)
-    except Exception as e:
-        print(f"[-] Error en ScreenSaver.SetActive(False): {e}", flush=True)
-
-def ensure_desired_orientation(force=False):
+def ensure_desired_orientation(force=False, async_exec=False):
     global current_sensor_orientation
     target_transform = "180" if current_sensor_orientation == "bottom-up" else ("90" if current_sensor_orientation == "left-up" else "normal")
     try:
@@ -161,18 +237,30 @@ def ensure_desired_orientation(force=False):
             if f"Transform: {target_transform}" in out:
                 return
         cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
-        subprocess.call(cmd, shell=True)
+        if async_exec:
+            subprocess.Popen(cmd, shell=True)
+        else:
+            subprocess.call(cmd, shell=True)
     except Exception:
         pass
 
 def sleep_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Reposo/Bloqueo activado: apagando pantalla y reduciendo consumo CPU/GPU...", flush=True)
+    print("[*] Reposo/Bloqueo activado: bloqueando Phosh, apagando pantalla y reduciendo consumo CPU/GPU...", flush=True)
     cur = get_current_backlight()
     if cur >= MIN_SAFE_BRIGHTNESS:
         saved_backlight_level = min(cur, MAX_SAFE_BRIGHTNESS)
 
     is_screen_on = False
+
+    # 1. Apagar backlight físico a 0 de inmediato para respuesta visual instantánea
+    set_backlight_hardware(0)
+
+    # 2. Bloquear toques en el panel táctil mientras la pantalla está apagada
+    grab_touchscreen(grab=True)
+
+    # 3. Bloquear sesión de Phosh para que al encender aparezca el Lockscreen
+    lock_screen()
 
     if login1_dbus_conn:
         try:
@@ -184,34 +272,31 @@ def sleep_tablet():
         except Exception:
             pass
 
-    # 1. Bloquear sesión de Phosh
-    lock_screen()
-
-    # 2. Apagar backlight físico a 0 (cero emisión de luz)
-    set_backlight_hardware(0)
-
-    # 3. Gobernadores de CPU en powersave y GPU en 390 MHz
+    # 4. Gobernadores de CPU en powersave y GPU en 390 MHz
     set_cpu_and_gpu_power(performance=False)
 
-    print("[*] Tablet en reposo: pantalla 0 nits, CPU en powersave, GPU en 390 MHz.", flush=True)
+    print("[*] Tablet en reposo: pantalla bloqueada a 0 nits, táctil inhibido, CPU en powersave, GPU en 390 MHz.", flush=True)
 
 def wake_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Despertando tablet: reactivando pantalla y aceleración GPU/CPU...", flush=True)
+    print("[*] Despertando tablet: reactivando pantalla en Lockscreen y aceleración GPU/CPU...", flush=True)
     is_screen_on = True
 
-    # 1. Restaurar CPUs a performance y GPU Mali a 812 MHz
-    set_cpu_and_gpu_power(performance=True)
+    # 1. Liberar bloqueo del panel táctil de inmediato
+    grab_touchscreen(grab=False)
 
-    # 2. Reactivar salida DRM con rotación al derecho 180°
-    ensure_desired_orientation(force=True)
+    # 2. Asegurar que el Lockscreen esté activo
+    lock_screen()
 
-    # 3. Restaurar brillo LCD seguro
+    # 3. Restaurar brillo LCD seguro de inmediato para respuesta visual instantánea
     target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
     set_backlight_hardware(target_b)
 
-    # 4. Despertar lockscreen
-    wake_screen()
+    # 4. Restaurar CPUs a performance y GPU Mali a 812 MHz
+    set_cpu_and_gpu_power(performance=True)
+
+    # 5. Asegurar rotación en segundo plano sin bloquear
+    ensure_desired_orientation(force=True, async_exec=True)
 
     if login1_dbus_conn:
         try:
@@ -223,7 +308,7 @@ def wake_tablet():
         except Exception:
             pass
 
-    print(f"[*] Tablet activa: pantalla a brillo {target_b}, GPU Mali a 812 MHz.", flush=True)
+    print(f"[*] Tablet activa en pantalla de bloqueo: brillo {target_b}, GPU Mali a 812 MHz.", flush=True)
 
 def toggle_screen_power():
     global last_power_press_time, is_screen_on
@@ -239,13 +324,10 @@ def toggle_screen_power():
 
 def show_volume_osd(vol, is_muted=False):
     try:
-        get_session_dbus_address()
         from gi.repository import Gio, GLib
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        proxy = Gio.DBusProxy.new_sync(
-            bus, Gio.DBusProxyFlags.NONE, None,
-            'org.gnome.Shell', '/org/gnome/Shell', 'org.gnome.Shell', None
-        )
+        bus = get_phosh_session_bus()
+        if not bus:
+            return
         level = max(0.0, min(1.0, float(vol)))
         if is_muted or level <= 0.03:
             icon_name = 'audio-volume-muted-symbolic'
@@ -257,13 +339,24 @@ def show_volume_osd(vol, is_muted=False):
             icon_name = 'audio-volume-high-symbolic'
         params = {
             'icon': GLib.Variant('s', icon_name),
-            'label': GLib.Variant('s', 'Volumen'),
+            'label': GLib.Variant('s', f'Volumen ({int(level * 100)}%)'),
             'level': GLib.Variant('d', level),
             'max-level': GLib.Variant('d', 1.0)
         }
-        proxy.ShowOSD('(a{sv})', params)
-    except Exception:
-        pass
+        bus.call(
+            'org.gnome.Shell',
+            '/org/gnome/Shell',
+            'org.gnome.Shell',
+            'ShowOSD',
+            GLib.Variant('(a{sv})', (params,)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            500,
+            None,
+            None
+        )
+    except Exception as e:
+        print(f"[-] Error mostrando OSD de volumen: {e}", flush=True)
 
 def get_pipewire_volume():
     try:
@@ -286,23 +379,23 @@ def adjust_volume(up=True):
         if up:
             subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null", shell=True)
             if vol <= 0.05 or is_muted:
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.15 2>/dev/null", shell=True)
+                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.10 2>/dev/null", shell=True)
             else:
                 subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null", shell=True)
         else:
-            if vol <= 0.08:
+            if vol <= 0.06:
                 subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.0 2>/dev/null", shell=True)
                 subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>/dev/null", shell=True)
             else:
                 subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null", shell=True)
         vol, is_muted = get_pipewire_volume()
+        print(f"[+] Volumen ajustado: {int(vol * 100)}% (muted={is_muted})", flush=True)
         show_volume_osd(vol, is_muted)
     except Exception as e:
         print(f"[-] Error ajustando volumen: {e}", flush=True)
 
 def start_dbus_services():
     global login1_dbus_conn
-    get_session_dbus_address()
     from gi.repository import Gio, GLib
 
     LOGIN1_XML = '''
@@ -498,6 +591,7 @@ def start_dbus_services():
     </node>
     '''
     session_node_info = Gio.DBusNodeInfo.new_for_xml(SESSION_XML)
+    registered_session_addr = [None]
 
     def handle_session_method(conn, sender, path, iface, method, params, invocation):
         if method == "Shutdown":
@@ -515,33 +609,38 @@ def start_dbus_services():
         else:
             invocation.return_value(None)
 
-    def on_session_bus_acquired(conn, name):
-        conn.register_object(
-            '/org/gnome/SessionManager',
-            session_node_info.interfaces[0],
-            handle_session_method, None, None
-        )
-
-    try:
-        Gio.bus_own_name(Gio.BusType.SESSION, 'org.gnome.SessionManager', Gio.BusNameOwnerFlags.NONE, on_session_bus_acquired, None, None)
-    except Exception as e:
-        print(f"[-] Error registrando org.gnome.SessionManager: {e}", flush=True)
-
     def on_screensaver_signal(conn, sender, path, iface, signal, params):
         if signal == "ActiveChanged":
             is_active = params.unpack()[0]
             if not is_active:
                 ensure_desired_orientation(force=False)
 
-    try:
-        session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        session_bus.signal_subscribe(
-            'org.gnome.ScreenSaver', 'org.gnome.ScreenSaver', 'ActiveChanged',
-            '/org/gnome/ScreenSaver', None, Gio.DBusSignalFlags.NONE,
-            on_screensaver_signal
-        )
-    except Exception:
-        pass
+    def ensure_session_bus_registered():
+        addr = get_session_dbus_address()
+        if not addr or addr == registered_session_addr[0]:
+            return True
+        sbus = get_phosh_session_bus()
+        if not sbus:
+            return True
+        try:
+            sbus.register_object(
+                '/org/gnome/SessionManager',
+                session_node_info.interfaces[0],
+                handle_session_method, None, None
+            )
+            Gio.bus_own_name_on_connection(sbus, 'org.gnome.SessionManager', Gio.BusNameOwnerFlags.NONE, None, None)
+            sbus.signal_subscribe(
+                'org.gnome.ScreenSaver', 'org.gnome.ScreenSaver', 'ActiveChanged',
+                '/org/gnome/ScreenSaver', None, Gio.DBusSignalFlags.NONE,
+                on_screensaver_signal
+            )
+            registered_session_addr[0] = addr
+            print(f"[+] Conectado al bus de sesión de Phosh ({addr})", flush=True)
+        except Exception as e:
+            print(f"[-] Aviso registrando en sesión Phosh: {e}", flush=True)
+        return True
+
+    GLib.timeout_add_seconds(2, ensure_session_bus_registered)
 
     loop = GLib.MainLoop()
     loop.run()
@@ -569,7 +668,7 @@ def get_grabbed_devices():
     return devs
 
 def main():
-    print("[+] tablet_power_daemon v2: Iniciando controlador de botón Power, Volumen, Brillo y Suspensión...", flush=True)
+    print("[+] tablet_power_daemon v3: Iniciando controlador de botón Power, Volumen, Brillo y Suspensión...", flush=True)
     release_static_backlight_locks()
     set_backlight_hardware(saved_backlight_level)
 
@@ -607,19 +706,21 @@ def main():
 
         for fd in r:
             try:
-                data = os.read(fd, EVENT_SIZE)
-                if len(data) < EVENT_SIZE:
+                raw = os.read(fd, EVENT_SIZE * 16)
+                if len(raw) < EVENT_SIZE:
                     continue
-                sec, usec, etype, code, val = struct.unpack(EVENT_FORMAT, data)
+                for offset in range(0, len(raw) - (len(raw) % EVENT_SIZE), EVENT_SIZE):
+                    sec, usec, etype, code, val = struct.unpack(EVENT_FORMAT, raw[offset:offset + EVENT_SIZE])
+                    if etype == EV_KEY and val in (1, 2):
+                        if code == KEY_POWER and val == 1:
+                            toggle_screen_power()
+                        elif code == KEY_VOLUMEUP:
+                            adjust_volume(up=True)
+                        elif code == KEY_VOLUMEDOWN:
+                            adjust_volume(up=False)
 
-                if etype == EV_KEY and val in (1, 2):
-                    if code == KEY_POWER and val == 1:
-                        toggle_screen_power()
-                    elif code == KEY_VOLUMEUP:
-                        adjust_volume(up=True)
-                    elif code == KEY_VOLUMEDOWN:
-                        adjust_volume(up=False)
-
+            except BlockingIOError:
+                pass
             except Exception:
                 try:
                     os.close(fd)

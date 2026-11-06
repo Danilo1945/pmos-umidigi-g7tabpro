@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-import dbus, dbus.service, dbus.mainloop.glib, glob, sys, time, os, subprocess
+import dbus, dbus.service, dbus.mainloop.glib, glob, sys, time, os, subprocess, signal
 from gi.repository import GLib
+
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 BUS_NAME = 'org.freedesktop.UPower'
 DAEMON_IFACE = 'org.freedesktop.UPower'
