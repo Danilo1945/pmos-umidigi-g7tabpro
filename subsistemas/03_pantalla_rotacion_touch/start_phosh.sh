@@ -64,16 +64,17 @@ fi
 
 # 3.3 Cargar cadena de módulos ALSA Audio (MT6789 AFE + MT6366 + 4x AW87359) si no hay tarjeta registrada
 if ! grep -q "mt6789" /proc/asound/cards 2>/dev/null; then
-    for am in nvmem-mt635x-efuse mtk-afe-external scp adsp mtk-scp-audiocommon audio_ipi \
-              snd-soc-audiodsp-common mtk-scp-audio mtk-sp-spk-amp snd-soc-mtk-common \
-              mtk-scp-ultra snd-soc-mtk-scp-ultra snd-soc-aw87xxx snd-soc-mt6789-afe \
-              mt6358-accdet mtk-btcvsd snd-soc-mt6366 mt6789-mt6366; do
+    for am in nvmem-mt635x-efuse mt635x_auxadc mt6358_battery mtk-afe-external scp adsp \
+              mtk-scp-audiocommon audio_ipi snd-soc-audiodsp-common mtk-scp-audio \
+              mtk-sp-spk-amp snd-soc-mtk-common mtk-scp-ultra snd-soc-mtk-scp-ultra \
+              snd-soc-aw87xxx snd-soc-mt6789-afe mt6358-accdet mtk-btcvsd \
+              snd-soc-mt6366 mt6789-mt6366; do
         modprobe "$am" 2>/dev/null || \
         insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$am.ko" 2>/dev/null || \
         insmod "/sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$am.ko" 2>/dev/null || \
         insmod "/lib/modules/$am.ko" 2>/dev/null || true
     done
-    for i in $(seq 1 20); do
+    for i in $(seq 1 30); do
         grep -q "mt6789" /proc/asound/cards 2>/dev/null && break
         sleep 0.1
     done
@@ -295,6 +296,23 @@ elif [ -f /usr/bin/tablet_battery_daemon.py ] && ! pgrep -f tablet_battery_daemo
 fi
 
 # 12. Subsistema 01: Audio (PipeWire + WirePlumber + 4x Amplificadores AW87359)
+for i in $(seq 1 30); do
+    grep -q "mt6789" /proc/asound/cards 2>/dev/null && break
+    sleep 0.1
+done
+mkdir -p /dev/snd 2>/dev/null || true
+for d in /sys/class/sound/*; do
+    [ -e "$d" ] || continue
+    sname=$(basename "$d")
+    if [ -f "$d/dev" ]; then
+        sdev=$(cat "$d/dev")
+        smaj=${sdev%%:*}
+        smin=${sdev##*:}
+        mknod "/dev/snd/$sname" c "$smaj" "$smin" 2>/dev/null || true
+    fi
+done
+chmod 755 /dev/snd 2>/dev/null || true
+chmod 666 /dev/snd/* 2>/dev/null || true
 rm -f /etc/pipewire/pipewire.conf.d/00-disable-portal.conf /etc/pipewire/pipewire.conf.d/10-null.conf 2>/dev/null || true
 if ! pgrep -x pipewire >/dev/null 2>&1; then
     rm -f /tmp/runtime-root/pipewire-0*.lock /tmp/runtime-root/pulse/native* 2>/dev/null || true

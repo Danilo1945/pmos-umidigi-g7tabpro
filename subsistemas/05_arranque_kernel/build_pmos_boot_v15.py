@@ -1072,7 +1072,7 @@ for m in \
     aw37503 mtk_panel_ext panel-dk068h5gq-dsi-vdo panel-l0a9w006c-dsi-vdo pwm-mtk-disp \
     leds-mtk leds-mtk-disp leds-mtk-pwm mediatek-drm \
     mtk-pmic-keys mtk-kpd tddi_9551 \
-    nvmem-mt635x-efuse mtk-afe-external scp adsp mtk-scp-audiocommon audio_ipi \
+    nvmem-mt635x-efuse mt635x_auxadc mt6358_battery mtk-afe-external scp adsp mtk-scp-audiocommon audio_ipi \
     snd-soc-audiodsp-common mtk-scp-audio mtk-sp-spk-amp snd-soc-mtk-common \
     mtk-scp-ultra snd-soc-mtk-scp-ultra snd-soc-aw87xxx snd-soc-mt6789-afe \
     mt6358-accdet mtk-btcvsd snd-soc-mt6366 mt6789-mt6366 \

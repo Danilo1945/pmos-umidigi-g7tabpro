@@ -212,9 +212,45 @@ def show_volume_osd(vol, is_muted=False, label="Volumen", custom_icon=None):
     except Exception:
         pass
 
+def ensure_snd_and_pipewire():
+    try:
+        if os.path.exists("/sys/class/sound/pcmC0D0p") and not os.path.exists("/dev/snd/pcmC0D0p"):
+            os.makedirs("/dev/snd", exist_ok=True)
+            for d in glob.glob("/sys/class/sound/*"):
+                sname = os.path.basename(d)
+                dev_file = os.path.join(d, "dev")
+                dst_node = os.path.join("/dev/snd", sname)
+                if os.path.isfile(dev_file) and not os.path.exists(dst_node):
+                    with open(dev_file, "r") as f:
+                        sdev = f.read().strip()
+                    if ":" in sdev:
+                        smaj, smin = sdev.split(":", 1)
+                        subprocess.run(f"mknod {dst_node} c {smaj} {smin}", shell=True, stderr=subprocess.DEVNULL)
+            subprocess.run("chmod 755 /dev/snd && chmod 666 /dev/snd/*", shell=True, stderr=subprocess.DEVNULL)
+
+        if os.path.exists("/dev/snd/pcmC0D0p"):
+            res = subprocess.run("pgrep -x pipewire", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode != 0:
+                print("[*] /dev/snd/pcmC0D0p listo; levantando PipeWire + WirePlumber...", flush=True)
+                subprocess.run(
+                    "rm -f /etc/pipewire/pipewire.conf.d/00-disable-portal.conf /etc/pipewire/pipewire.conf.d/10-null.conf "
+                    "/tmp/runtime-root/pipewire-0*.lock /tmp/runtime-root/pulse/native* 2>/dev/null || true; "
+                    "XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/pipewire >/var/log/pipewire.log 2>&1 & "
+                    "sleep 0.5; "
+                    "XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/wireplumber >/var/log/wireplumber.log 2>&1 & "
+                    "if ! pgrep -x pipewire-pulse >/dev/null 2>&1; then "
+                    "XDG_RUNTIME_DIR=/tmp/runtime-root DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /usr/bin/pipewire-pulse >/var/log/pipewire-pulse.log 2>&1 & "
+                    "fi",
+                    shell=True
+                )
+    except Exception:
+        pass
+
 def main():
     global headphones_plugged_state
     print("[+] tablet_audio_daemon v11 (ALSA 4x AW87359 + PipeWire + Jack 3.5mm) iniciado...", flush=True)
+
+    ensure_snd_and_pipewire()
 
     devs = get_jack_devices()
     print(f"[*] Dispositivos Jack detectados: {[(ev, name) for ev, name in devs.values()]}", flush=True)
@@ -227,6 +263,7 @@ def main():
     sync_hardware_state(force=True)
 
     while True:
+        ensure_snd_and_pipewire()
         # Sincronizar estado de mute/altavoces cada ciclo con el volumen de PipeWire
         sync_hardware_state()
 
