@@ -115,25 +115,55 @@ EOF_UDEV_N
         done
     fi
 
-    # Configuración de wpa_supplicant y NetworkManager en sysroot si aplica
-    mkdir -p /etc/wpa_supplicant /run/wpa_supplicant 2>/dev/null || true
-    if [ ! -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
-        cat << 'EOF_WPA' > /etc/wpa_supplicant/wpa_supplicant.conf
+    # Configuración de wpa_supplicant y NetworkManager (tanto en initramfs como en sysroot)
+    for prefix in "" "/sysroot"; do
+        [ -n "$prefix" ] && [ ! -d "$prefix/etc" ] && continue
+        mkdir -p "$prefix/etc/wpa_supplicant" "$prefix/run/wpa_supplicant" "$prefix/etc/NetworkManager/conf.d" 2>/dev/null || true
+        if [ ! -f "$prefix/etc/wpa_supplicant/wpa_supplicant.conf" ]; then
+            cat << 'EOF_WPA' > "$prefix/etc/wpa_supplicant/wpa_supplicant.conf"
 ctrl_interface=/run/wpa_supplicant
 ctrl_interface_group=0
 update_config=1
 EOF_WPA
-    fi
-
-    mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
-    cat << 'EOF_NM' > /etc/NetworkManager/conf.d/10-manage-wifi.conf
+        fi
+        cat << 'EOF_NM' > "$prefix/etc/NetworkManager/conf.d/10-manage-wifi.conf"
 [device-wifi]
 match-device=interface-name:wlan*
 managed=1
 EOF_NM
+    done
 
-    if ! pgrep -x NetworkManager >/dev/null 2>&1; then
-        NetworkManager 2>/dev/null &
+    # Iniciar servicios en sysroot o en entorno actual
+    if [ -d /sysroot/usr/sbin ] && [ ! -f /usr/bin/phoc ]; then
+        mkdir -p /sysroot/run/dbus /sysroot/var/run/dbus 2>/dev/null || true
+        if ! chroot /sysroot pgrep -x dbus-daemon >/dev/null 2>&1; then
+            rm -f /sysroot/run/dbus/dbus.pid /sysroot/var/run/dbus/dbus.pid 2>/dev/null || true
+            chroot /sysroot dbus-daemon --system --fork 2>/dev/null || true
+        fi
+        if ! chroot /sysroot pgrep -x wpa_supplicant >/dev/null 2>&1; then
+            chroot /sysroot /usr/sbin/wpa_supplicant -u -B -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
+        fi
+        sleep 1
+        if ! chroot /sysroot pgrep -x NetworkManager >/dev/null 2>&1; then
+            chroot /sysroot /usr/sbin/NetworkManager 2>/dev/null &
+            sleep 1
+        fi
+        chroot /sysroot /usr/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
+    else
+        mkdir -p /run/dbus /var/run/dbus 2>/dev/null || true
+        if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
+            rm -f /run/dbus/dbus.pid /var/run/dbus/dbus.pid 2>/dev/null || true
+            dbus-daemon --system --fork 2>/dev/null || true
+        fi
+        if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+            /usr/sbin/wpa_supplicant -u -B -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
+        fi
+        sleep 1
+        if ! pgrep -x NetworkManager >/dev/null 2>&1; then
+            /usr/sbin/NetworkManager 2>/dev/null &
+            sleep 1
+        fi
+        /usr/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
     fi
 else
     echo "[-] wlan0 no aparecio de inmediato. Revisando dmesg:"

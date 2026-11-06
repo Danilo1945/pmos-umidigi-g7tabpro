@@ -73,6 +73,10 @@ if ! grep -q "mt6789" /proc/asound/cards 2>/dev/null; then
         insmod "/sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$am.ko" 2>/dev/null || \
         insmod "/lib/modules/$am.ko" 2>/dev/null || true
     done
+    for i in $(seq 1 20); do
+        grep -q "mt6789" /proc/asound/cards 2>/dev/null && break
+        sleep 0.1
+    done
 fi
 mkdir -p /dev/snd /sysroot/dev/snd 2>/dev/null || true
 for d in /sys/class/sound/*; do
