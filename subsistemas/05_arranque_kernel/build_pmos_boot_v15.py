@@ -36,10 +36,9 @@ BLACKLIST_MODULES = {
     "tkcore.ko",
     "tkcore_drv.ko",
     "it6112_i2c.ko",
-    "adapter_class.ko",             # Cargar en start_phosh.sh para evitar deadlock I2C temprano
-    "charger_class.ko",
+    "rtc-mt6397.ko",                # Evitar pánico en mt6358-gauge sin nvram daemon
+    "adapter_class.ko",             # Cargar charger_class y mt6375-charger en start_phosh.sh
     "mtk_charger_algorithm_class.ko",
-    "mt6375-charger.ko",
     "pd_dbg_info.ko",
     "tcpc_class.ko",
     "tcpc_mt6375.ko",

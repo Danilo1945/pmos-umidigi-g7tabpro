@@ -306,8 +306,8 @@ if ! pgrep -x NetworkManager >/dev/null 2>&1; then
     /usr/sbin/NetworkManager 2>/dev/null &
 fi
 
-# 11. Subsistema 02: Batería, Telemetría ADC/OCV y Proveedor UPower
-for bm in mt635x_auxadc mt6358_battery; do
+# 11. Subsistema 02: Batería, Cargador Sub-PMIC MT6375, Telemetría ADC/OCV y Proveedor UPower
+for bm in mt635x_auxadc charger_class mt6375-charger mt6358_battery; do
     modprobe "$bm" 2>/dev/null || insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$bm.ko" 2>/dev/null || true
 done
 if [ -f /usr/bin/upower_battery_provider.py ] && ! pgrep -f upower_battery_provider.py >/dev/null 2>&1; then
