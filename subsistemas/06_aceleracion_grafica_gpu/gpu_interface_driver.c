@@ -2107,8 +2107,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
             convert_and_store_tex_region(st, 0, 0, width, height, format, pixels,
                                          g_unpack_row_length, g_unpack_skip_pixels, g_unpack_skip_rows);
         }
-        kmsg_always("[GPU-TEX] glTexImage2D tex=%u %dx%d fmt=0x%x row_len=%d pixels=%p\n",
-                    g_bound_tex, width, height, format, g_unpack_row_length, pixels);
+        kmsg_log("[GPU-TEX] glTexImage2D tex=%u %dx%d fmt=0x%x row_len=%d pixels=%p\n",
+                 g_bound_tex, width, height, format, g_unpack_row_length, pixels);
         return;
     }
     if (real_fn) real_fn(target, level, internalformat, width, height, border, format, type, pixels);
@@ -2384,7 +2384,7 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
 {
     static void (*real_fn)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *) = NULL;
     if (!real_fn) real_fn = resolve_mali_gl("glVertexAttribPointer");
-    if (index == 0) {
+    if (size == 2 && type == 0x1406 /* GL_FLOAT */ && pointer != NULL) {
         g_attrib0_ptr = (const float *)pointer;
         g_attrib0_size = size;
         g_attrib0_stride = stride;
@@ -2777,7 +2777,6 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
 
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
-    (void)mode;
     s_draw_call_counter++;
     struct dumb_bo_entry *d = get_active_fbo_dumb();
     if (!d || !d->cpu_map || g_current_prog == 0 || g_current_prog >= MAX_SHADOW_Programs) {
@@ -2790,8 +2789,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int fb_stride_px = (int)(d->stride / 4);
     uint32_t *fb_px = (uint32_t *)d->cpu_map;
 
-    /* Coordenadas de entrada de los 4 vértices del quad en wlroots GLES2:
-     * quad_verts = { 0, 0,  0, 1,  1, 0,  1, 1 } */
+    /* Coordenadas de entrada de los 4 vértices del quad completo [0..1]x[0..1] en wlroots GLES2 */
     const float vx[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
     const float vy[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 
@@ -2828,152 +2826,187 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (sc_y1 < clip_y1) clip_y1 = sc_y1;
     }
 
-    int rx0 = (x0 > clip_x0) ? x0 : clip_x0;
-    int ry0 = (y0 > clip_y0) ? y0 : clip_y0;
-    int rx1 = (x1 < clip_x1) ? x1 : clip_x1;
-    int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
-    if (rx0 >= rx1 || ry0 >= ry1) return;
+    /* En wlroots (draw_quad_triangles), cada rectángulo de daño parcial (clip) se pasa como
+     * 6 vértices (2 triángulos GL_TRIANGLES) en g_attrib0_ptr con coordenadas normalizadas
+     * dentro del quad [0..1]x[0..1]. Respetar estos sub-rectángulos evita sobrescribir regiones
+     * fuera del área dañada (ej. PhoshHome cuando solo se actualiza la barra superior). */
+    int has_subrects = (mode == 0x0004 /* GL_TRIANGLES */ && count >= 6 && (count % 6) == 0 && g_attrib0_ptr != NULL);
+    int num_rects = has_subrects ? (count / 6) : 1;
 
-    if (sp->is_tex == 0) {
-        /* Quad de color sólido optimizado */
-        uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
-        int do_blend = (g_blend_enabled && ((col >> 24) < 255));
-        int count = rx1 - rx0;
-        if (count <= 0) return;
+    for (int r = 0; r < num_rects; r++) {
+        int rx0 = (x0 > clip_x0) ? x0 : clip_x0;
+        int ry0 = (y0 > clip_y0) ? y0 : clip_y0;
+        int rx1 = (x1 < clip_x1) ? x1 : clip_x1;
+        int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
 
-        if (!do_blend) {
-            uint32_t opaque_col = col | 0xFF000000u;
-            uint32x4_t vcol = vdupq_n_u32(opaque_col);
-            for (int py = ry0; py < ry1; py++) {
-                int target_py = fb_h - 1 - py;
-                int dst_col_start = fb_w - rx1;
-                uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
-                int x = 0;
-                for (; x <= count - 4; x += 4) {
-                    vst1q_u32(dst_row + x, vcol);
+        if (has_subrects) {
+            const float *rv = g_attrib0_ptr + (first + r * 6) * 2;
+            float r_min_x = 1e9f, r_max_x = -1e9f, r_min_y = 1e9f, r_max_y = -1e9f;
+            for (int vi = 0; vi < 6; vi++) {
+                float rvx = rv[vi * 2 + 0];
+                float rvy = rv[vi * 2 + 1];
+                float ndc_x = rvx * sp->proj[0] + rvy * sp->proj[1] + sp->proj[2];
+                float ndc_y = rvx * sp->proj[3] + rvy * sp->proj[4] + sp->proj[5];
+                float rsx = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
+                float rsy = (float)g_vp_y + (1.0f - ndc_y) * 0.5f * (float)g_vp_h;
+                if (rsx < r_min_x) r_min_x = rsx;
+                if (rsx > r_max_x) r_max_x = rsx;
+                if (rsy < r_min_y) r_min_y = rsy;
+                if (rsy > r_max_y) r_max_y = rsy;
+            }
+            int sx0 = (int)(r_min_x + 0.5f);
+            int sx1 = (int)(r_max_x + 0.5f);
+            int sy0 = (int)(r_min_y + 0.5f);
+            int sy1 = (int)(r_max_y + 0.5f);
+            if (sx0 > rx0) rx0 = sx0;
+            if (sy0 > ry0) ry0 = sy0;
+            if (sx1 < rx1) rx1 = sx1;
+            if (sy1 < ry1) ry1 = sy1;
+        }
+
+        if (rx0 >= rx1 || ry0 >= ry1) continue;
+
+        if (sp->is_tex == 0) {
+            /* Quad de color sólido optimizado */
+            uint32_t col = pack_argb(sp->color[0], sp->color[1], sp->color[2], sp->color[3]);
+            int do_blend = (g_blend_enabled && ((col >> 24) < 255));
+            int span_w = rx1 - rx0;
+            if (span_w <= 0) continue;
+
+            if (!do_blend) {
+                uint32_t opaque_col = col | 0xFF000000u;
+                uint32x4_t vcol = vdupq_n_u32(opaque_col);
+                for (int py = ry0; py < ry1; py++) {
+                    int target_py = fb_h - 1 - py;
+                    int dst_col_start = fb_w - rx1;
+                    uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                    int x = 0;
+                    for (; x <= span_w - 4; x += 4) {
+                        vst1q_u32(dst_row + x, vcol);
+                    }
+                    for (; x < span_w; x++) {
+                        dst_row[x] = opaque_col;
+                    }
                 }
-                for (; x < count; x++) {
-                    dst_row[x] = opaque_col;
+            } else {
+                for (int py = ry0; py < ry1; py++) {
+                    int target_py = fb_h - 1 - py;
+                    int dst_col_start = fb_w - rx1;
+                    uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+                    for (int x = 0; x < span_w; x++) {
+                        dst_row[dst_col_start + x] = blend_premult_argb(col, dst_row[dst_col_start + x]);
+                    }
                 }
             }
-        } else {
+            continue;
+        }
+
+        /* Quad con textura */
+        if (g_bound_tex == 0 || g_bound_tex >= MAX_SHADOW_TEXTURES) continue;
+        struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
+        if (!st->pixels || st->width <= 0 || st->height <= 0) continue;
+
+        float quad_w = (max_sx - min_sx);
+        float quad_h = (max_sy - min_sy);
+        if (quad_w < 1.0f || quad_h < 1.0f) continue;
+
+        float min_u = 1e9f, max_u = -1e9f, min_v = 1e9f, max_v = -1e9f;
+        for (int i = 0; i < 4; i++) {
+            if (u[i] < min_u) min_u = u[i];
+            if (u[i] > max_u) max_u = u[i];
+            if (v[i] < min_v) min_v = v[i];
+            if (v[i] > max_v) max_v = v[i];
+        }
+        if (max_u - min_u < 0.001f) { min_u = 0.0f; max_u = 1.0f; }
+        if (max_v - min_v < 0.001f) { min_v = 0.0f; max_v = 1.0f; }
+        float u_left = min_u, u_right = max_u;
+        float v_top = min_v,  v_bottom = max_v;
+
+        int tw = st->width;
+        int th = st->height;
+        int is_opaque_shader = (sp->is_tex == 2) || !g_blend_enabled;
+        uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
+        if (alpha_scale > 256u) alpha_scale = 256u;
+
+        /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas, rotaciones) */
+        int is_1to1 = (fabsf(quad_w - (float)tw) < 1.0f && fabsf(quad_h - (float)th) < 1.0f &&
+                       fabsf(fabsf(u_right - u_left) - 1.0f) < 0.02f &&
+                       fabsf(fabsf(v_bottom - v_top) - 1.0f) < 0.02f);
+
+        if (is_1to1) {
+            int base_x = (int)(min_sx + 0.5f);
+            int base_y = (int)(min_sy + 0.5f);
+
+            int tx_start = rx0 - base_x;
+            int span_w = rx1 - rx0;
+            if (tx_start < 0) {
+                span_w += tx_start;
+                tx_start = 0;
+            }
+            if (tx_start + span_w > tw) span_w = tw - tx_start;
+            if (span_w <= 0) continue;
+
+            int dst_col_start = fb_w - (rx0 + span_w);
+
             for (int py = ry0; py < ry1; py++) {
+                int row_rel = py - base_y;
+                if (row_rel < 0 || row_rel >= th) continue;
+                const uint32_t *src_row = st->pixels + row_rel * tw;
+
                 int target_py = fb_h - 1 - py;
-                int dst_col_start = fb_w - rx1;
                 uint32_t *dst_row = fb_px + target_py * fb_stride_px;
-                for (int x = 0; x < count; x++) {
-                    dst_row[dst_col_start + x] = blend_premult_argb(col, dst_row[dst_col_start + x]);
+                const uint32_t *src_end = src_row + tx_start + span_w;
+
+                if (is_opaque_shader && alpha_scale >= 255u) {
+                    copy_row_neon_rev(dst_row + dst_col_start, src_end, span_w);
+                } else if (alpha_scale >= 255u) {
+                    blend_row_neon_rev(dst_row + dst_col_start, src_end, span_w);
+                } else {
+                    blend_row_neon_rev_alpha(dst_row + dst_col_start, src_end, span_w, alpha_scale);
                 }
             }
+            continue;
         }
-        return;
-    }
 
-    /* Quad con textura */
-    if (g_bound_tex == 0 || g_bound_tex >= MAX_SHADOW_TEXTURES) return;
-    struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
-    if (!st->pixels || st->width <= 0 || st->height <= 0) return;
-
-    float quad_w = (max_sx - min_sx);
-    float quad_h = (max_sy - min_sy);
-    if (quad_w < 1.0f || quad_h < 1.0f) return;
-
-    float min_u = 1e9f, max_u = -1e9f, min_v = 1e9f, max_v = -1e9f;
-    for (int i = 0; i < 4; i++) {
-        if (u[i] < min_u) min_u = u[i];
-        if (u[i] > max_u) max_u = u[i];
-        if (v[i] < min_v) min_v = v[i];
-        if (v[i] > max_v) max_v = v[i];
-    }
-    if (max_u - min_u < 0.001f) { min_u = 0.0f; max_u = 1.0f; }
-    if (max_v - min_v < 0.001f) { min_v = 0.0f; max_v = 1.0f; }
-    float u_left = min_u, u_right = max_u;
-    float v_top = min_v,  v_bottom = max_v;
-
-    int tw = st->width;
-    int th = st->height;
-    int is_opaque_shader = (sp->is_tex == 2) || !g_blend_enabled;
-    uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
-    if (alpha_scale > 256u) alpha_scale = 256u;
-
-    /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas, rotaciones) */
-    int is_1to1 = (fabsf(quad_w - (float)tw) < 1.0f && fabsf(quad_h - (float)th) < 1.0f &&
-                   fabsf(fabsf(u_right - u_left) - 1.0f) < 0.02f &&
-                   fabsf(fabsf(v_bottom - v_top) - 1.0f) < 0.02f);
-
-    if (is_1to1) {
-        int base_x = (int)(min_sx + 0.5f);
-        int base_y = (int)(min_sy + 0.5f);
-
-        int tx_start = rx0 - base_x;
-        int count = rx1 - rx0;
-        if (tx_start < 0) {
-            count += tx_start;
-            tx_start = 0;
-        }
-        if (tx_start + count > tw) count = tw - tx_start;
-        if (count <= 0) return;
-
-        int dst_col_start = fb_w - (rx0 + count);
+        /* Caso con escalado: Aritmética de punto fijo 16.16 (sin punto flotante por píxel) */
+        float inv_qw = 1.0f / quad_w;
+        float inv_qh = 1.0f / quad_h;
+        float u_span = (u_right - u_left) * (float)tw;
+        int32_t step_u_fp = (int32_t)(u_span * inv_qw * 65536.0f);
 
         for (int py = ry0; py < ry1; py++) {
-            int row_rel = py - base_y;
-            if (row_rel < 0 || row_rel >= th) continue;
-            const uint32_t *src_row = st->pixels + row_rel * tw;
+            float fy = ((float)py + 0.5f - min_sy) * inv_qh;
+            float tv = v_top + fy * (v_bottom - v_top);
+            int ty = (int)(tv * (float)th);
+            if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+            const uint32_t *src_row = st->pixels + ty * tw;
 
             int target_py = fb_h - 1 - py;
             uint32_t *dst_row = fb_px + target_py * fb_stride_px;
-            const uint32_t *src_end = src_row + tx_start + count;
 
-            if (is_opaque_shader && alpha_scale >= 255u) {
-                copy_row_neon_rev(dst_row + dst_col_start, src_end, count);
-            } else if (alpha_scale >= 255u) {
-                blend_row_neon_rev(dst_row + dst_col_start, src_end, count);
-            } else {
-                blend_row_neon_rev_alpha(dst_row + dst_col_start, src_end, count, alpha_scale);
-            }
-        }
-        return;
-    }
+            float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
+            int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
 
-    /* Caso con escalado: Aritmética de punto fijo 16.16 (sin punto flotante por píxel) */
-    float inv_qw = 1.0f / quad_w;
-    float inv_qh = 1.0f / quad_h;
-    float u_span = (u_right - u_left) * (float)tw;
-    int32_t step_u_fp = (int32_t)(u_span * inv_qw * 65536.0f);
+            for (int px = rx0; px < rx1; px++) {
+                int tx = u_curr_fp >> 16;
+                u_curr_fp += step_u_fp;
+                if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
 
-    for (int py = ry0; py < ry1; py++) {
-        float fy = ((float)py + 0.5f - min_sy) * inv_qh;
-        float tv = v_top + fy * (v_bottom - v_top);
-        int ty = (int)(tv * (float)th);
-        if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
-        const uint32_t *src_row = st->pixels + ty * tw;
-
-        int target_py = fb_h - 1 - py;
-        uint32_t *dst_row = fb_px + target_py * fb_stride_px;
-
-        float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
-        int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
-
-        for (int px = rx0; px < rx1; px++) {
-            int tx = u_curr_fp >> 16;
-            u_curr_fp += step_u_fp;
-            if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
-
-            int target_px = (fb_w - 1) - px;
-            uint32_t spx = src_row[tx];
-            if (is_opaque_shader && alpha_scale >= 255u) {
-                dst_row[target_px] = spx | 0xFF000000u;
-            } else {
-                if (sp->is_tex == 2) spx |= 0xFF000000u;
-                if (alpha_scale < 255u) {
-                    uint32_t sa = (((spx >> 24) & 0xFFu) * alpha_scale) >> 8;
-                    uint32_t sr = (((spx >> 16) & 0xFFu) * alpha_scale) >> 8;
-                    uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
-                    uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
-                    spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                int target_px = (fb_w - 1) - px;
+                uint32_t spx = src_row[tx];
+                if (is_opaque_shader && alpha_scale >= 255u) {
+                    dst_row[target_px] = spx | 0xFF000000u;
+                } else {
+                    if (sp->is_tex == 2) spx |= 0xFF000000u;
+                    if (alpha_scale < 255u) {
+                        uint32_t sa = (((spx >> 24) & 0xFFu) * alpha_scale) >> 8;
+                        uint32_t sr = (((spx >> 16) & 0xFFu) * alpha_scale) >> 8;
+                        uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
+                        uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
+                        spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                    }
+                    dst_row[target_px] = blend_premult_argb(spx, dst_row[target_px]);
                 }
-                dst_row[target_px] = blend_premult_argb(spx, dst_row[target_px]);
             }
         }
     }
