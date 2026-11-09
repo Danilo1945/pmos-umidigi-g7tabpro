@@ -310,7 +310,7 @@ if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
     dbus-daemon --system --fork 2>/dev/null || true
 fi
 
-# 10. Subsistema 04: Conectividad Wi-Fi (wpa_supplicant + NetworkManager)
+# 10. Subsistema 04: Conectividad Wi-Fi (wpa_supplicant + NetworkManager) y Bluetooth (BlueZ)
 if ip link show wlan0 >/dev/null 2>&1; then
     ip link set wlan0 up 2>/dev/null || true
     if [ -f /sys/class/net/wlan0/ifindex ]; then
@@ -337,6 +337,9 @@ if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
 fi
 if ! pgrep -x NetworkManager >/dev/null 2>&1; then
     /usr/sbin/NetworkManager 2>/dev/null &
+fi
+if [ -f /usr/bin/tablet_bt_daemon.py ] && ! pgrep -f tablet_bt_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/bin/tablet_bt_daemon.py > /var/log/tablet_bt.log 2>&1 &
 fi
 
 # 11. Subsistema 02: Batería, Cargador Sub-PMIC MT6375, Telemetría ADC/OCV y Proveedor UPower

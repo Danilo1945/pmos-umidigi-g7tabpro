@@ -365,6 +365,14 @@ def prepare_initramfs_v9(output_gz_path):
     os.chmod(wmt_wifi_sh, 0o755)
     print(f"  [+] Script wmt_wifi_start.sh instalado en {wmt_wifi_sh}")
 
+    # tablet_bt_daemon.py (Puente H4 Userspace para Bluetooth MediaTek ConnSys hci0)
+    bt_daemon_src = os.path.join(repo_dir, "subsistemas/04_wifi_conectividad/tablet_bt_daemon.py")
+    if os.path.exists(bt_daemon_src):
+        bt_daemon_dst = os.path.join(workdir, "bin", "tablet_bt_daemon.py")
+        shutil.copy2(bt_daemon_src, bt_daemon_dst)
+        os.chmod(bt_daemon_dst, 0o755)
+        print(f"  [+] tablet_bt_daemon.py instalado en {bt_daemon_dst}")
+
     # libseat_direct.so y start_phosh.sh para GNOME / Phosh
     repo_dir = "/home/danilo/Documentos/TABLET/FUNCIONALIDADES_FINALES"
     lsd_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/libseat_direct.so")
@@ -555,8 +563,9 @@ cp -f /bin/load_mali_chain.sh /sysroot/usr/bin/load_mali_chain.sh 2>/dev/null ||
 cp -f /bin/panel_pwm_force /sysroot/usr/bin/panel_pwm_force 2>/dev/null || true
 cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
 cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
+cp -f /bin/tablet_bt_daemon.py /sysroot/usr/bin/tablet_bt_daemon.py 2>/dev/null || true
 cp -f /bin/tablet_power_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
-chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/tablet_power_daemon.py /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
+chmod 755 /sysroot/usr/bin/drm_splash /sysroot/usr/bin/wdt_pet /sysroot/usr/bin/gpio_switch /sysroot/usr/bin/wmt_init_complete /sysroot/usr/bin/wmt_wifi_start.sh /sysroot/usr/bin/start_plasma_mobile.sh /sysroot/usr/bin/backlight_guard /sysroot/bin/backlight_guard /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/tablet_bt_daemon.py /sysroot/usr/bin/tablet_power_daemon.py /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so 2>/dev/null || true
 mknod /sysroot/dev/mali0 c 10 116 2>/dev/null || true
 chmod 666 /sysroot/dev/mali0 2>/dev/null || true
 
@@ -1368,6 +1377,7 @@ if [ -d /sysroot/usr/bin ]; then
         cp -f /bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh_service.sh 2>/dev/null || true
         cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
         cp -f /bin/phosh_wrapper.sh /sysroot/usr/bin/phosh_wrapper.sh 2>/dev/null || true
+        cp -f /bin/tablet_bt_daemon.py /sysroot/usr/bin/tablet_bt_daemon.py 2>/dev/null || true
         cp -f /bin/battery_daemon /sysroot/usr/bin/battery_daemon 2>/dev/null || true
         cp -f /bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_battery_daemon.py 2>/dev/null || true
         cp -f /bin/upower_battery_provider.py /sysroot/usr/bin/upower_battery_provider.py 2>/dev/null || true
