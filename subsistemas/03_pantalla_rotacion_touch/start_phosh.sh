@@ -94,6 +94,37 @@ done
 chmod 755 /dev/snd /sysroot/dev/snd 2>/dev/null || true
 chmod 666 /dev/snd/* /sysroot/dev/snd/* 2>/dev/null || true
 
+# 3.4 Cargar periféricos adicionales (MicroSD mmc0, Linterna AW36515, Vibrador, SensorHub, BT/GPS/FM, AUXADC/CCCI)
+for pm in mt6577_auxadc mt6375-auxadc ccci_md_clk ccci_rtc \
+          cqhci rpmb-mtk mtk-mmc-autok mtk-mmc-dbg mtk-mmc \
+          regulator-vibrator mtk-pwm \
+          flashlight aw36515 tcs3724 \
+          hf_manager sensorhub \
+          bt_drv_connac1x gps_pwr gps_drv_stp fmradio_drv_mt6631_6635; do
+    modprobe "$pm" 2>/dev/null || \
+    insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$pm.ko" 2>/dev/null || \
+    insmod "/sysroot/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$pm.ko" 2>/dev/null || \
+    insmod "/lib/modules/$pm.ko" 2>/dev/null || true
+done
+rm -f /dev/stpbt /dev/stpgps /sysroot/dev/stpbt /sysroot/dev/stpgps 2>/dev/null || true
+mknod -m 666 /dev/stpgps c 191 0 2>/dev/null || true
+mknod -m 666 /dev/stpbt c 192 0 2>/dev/null || true
+mknod -m 666 /sysroot/dev/stpgps c 191 0 2>/dev/null || true
+mknod -m 666 /sysroot/dev/stpbt c 192 0 2>/dev/null || true
+fm_maj=$(awk '$2=="fm" {print $1}' /proc/devices 2>/dev/null)
+if [ -n "$fm_maj" ]; then
+    rm -f /dev/fm /sysroot/dev/fm 2>/dev/null || true
+    mknod -m 666 /dev/fm c "$fm_maj" 0 2>/dev/null || true
+    mknod -m 666 /sysroot/dev/fm c "$fm_maj" 0 2>/dev/null || true
+fi
+hf_maj=$(awk '$2=="hf_manager" {print $1}' /proc/devices 2>/dev/null)
+if [ -n "$hf_maj" ]; then
+    rm -f /dev/hf_manager /sysroot/dev/hf_manager 2>/dev/null || true
+    mknod -m 666 /dev/hf_manager c "$hf_maj" 0 2>/dev/null || true
+    mknod -m 666 /sysroot/dev/hf_manager c "$hf_maj" 0 2>/dev/null || true
+fi
+chmod 666 /sys/class/flashlight_core/flashlight/flashlight_torch /sys/class/leds/vibrator/brightness 2>/dev/null || true
+
 # 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
 mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
 if ! grep -q ' /dev/shm ' /proc/mounts 2>/dev/null; then
@@ -183,8 +214,10 @@ export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
 
-# Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
-export GSK_RENDERER=gl
+# Compatibilidad estable para clientes GTK4 y Qt6/KDE en Wayland
+export GSK_RENDERER=cairo
+export GDK_DEBUG=gl-disable
+export QT_QUICK_BACKEND=software
 unset GDK_GL
 unset GDK_RENDERING
 unset GDK_DISABLE

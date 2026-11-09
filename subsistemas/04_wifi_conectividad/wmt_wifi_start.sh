@@ -7,14 +7,14 @@ echo "=========================================================="
 echo "  Inicializando Wi-Fi MediaTek MT6631 (WMT + STP + gen4m) "
 echo "=========================================================="
 
-# 1. Nodos de comunicacion estaticos
+# 1. Nodos de comunicacion estaticos (stpbt=192, stpgps=191, stpwmt=190)
+rm -f /dev/stpbt /dev/stpgps
 [ ! -c /dev/stpwmt ] && mknod -m 666 /dev/stpwmt c 190 0
 [ ! -c /dev/wmtdetect ] && mknod -m 666 /dev/wmtdetect c 154 0
 [ ! -c /dev/wmtWifi ] && mknod -m 666 /dev/wmtWifi c 508 0
-[ ! -c /dev/stpbt ] && mknod -m 666 /dev/stpbt c 191 0
-[ ! -c /dev/stpgps ] && mknod -m 666 /dev/stpgps c 192 0
-[ ! -c /dev/fm ] && mknod -m 666 /dev/fm c 193 0
-chmod 666 /dev/stpwmt /dev/wmtdetect /dev/wmtWifi /dev/stpbt /dev/stpgps /dev/fm 2>/dev/null || true
+mknod -m 666 /dev/stpgps c 191 0 2>/dev/null || true
+mknod -m 666 /dev/stpbt c 192 0 2>/dev/null || true
+chmod 666 /dev/stpwmt /dev/wmtdetect /dev/wmtWifi /dev/stpbt /dev/stpgps 2>/dev/null || true
 
 # 2. Enlaces esperados por el firmware
 mkdir -p /vendor/firmware /system/etc/firmware /system/vendor/firmware /data/vendor/stp_dump /data/vendor/connsyslog /proc/driver 2>/dev/null || true
@@ -41,6 +41,15 @@ load_m cfg80211.ko
 load_m connadp.ko
 load_m btif_drv.ko
 load_m wmt_drv.ko
+load_m bt_drv_connac1x.ko
+load_m gps_pwr.ko
+load_m gps_drv_stp.ko
+load_m fmradio_drv_mt6631_6635.ko
+fm_maj=$(awk '$2=="fm" {print $1}' /proc/devices 2>/dev/null)
+if [ -n "$fm_maj" ]; then
+    rm -f /dev/fm
+    mknod -m 666 /dev/fm c "$fm_maj" 0 2>/dev/null || true
+fi
 
 # 4. Localizar bundle android_compat si existe
 COMPAT="/android_compat"

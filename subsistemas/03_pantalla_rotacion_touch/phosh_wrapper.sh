@@ -9,16 +9,15 @@ export XDG_RUNTIME_DIR=/tmp/runtime-root
 export WAYLAND_DISPLAY=wayland-0
 export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
+export QT_QUICK_BACKEND=software
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
 
-# Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
-export GSK_RENDERER=gl
-unset GDK_GL
-unset GDK_RENDERING
-unset GDK_DISABLE
+# Clientes GTK4 y Qt6 renderizan en SHM Wayland y Phoc compone por GPU Mali-G57
+export GSK_RENDERER=cairo
+export GDK_DEBUG=gl-disable
 
 # 1. Esperar disponibilidad del socket Wayland de Phoc
 count=0

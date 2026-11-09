@@ -84,13 +84,24 @@ def check_jack_state(fd):
         return False
 
 def configure_gain_levels():
-    """Configura ganancia calibrada de hardware a fidelidad Hi-Fi óptima sin saturación ni siseo."""
+    """Configura ganancia calibrada de hardware a fidelidad Hi-Fi óptima sin saturación ni siseo, y activa captura de micrófono."""
     run_mixer("cset numid=27 32768")    # ADDA_DL_GAIN = 32768 (nivel nominal perfecto sin sobrecarga AGC)
     run_mixer("cset numid=299 12")      # Headset Volume (12/18 = ganancia analógica limpia sin ruido blanco)
     run_mixer("cset numid=300 12")      # Lineout Volume (12/18 = ganancia analógica limpia)
     run_mixer("cset numid=324 0")       # LOL Mux -> Open (evita diafonía)
     run_mixer("cset numid=179 0")       # I2S3_CH1 OFF (evita inyección de ruido digital en el bus)
     run_mixer("cset numid=192 0")       # I2S3_CH2 OFF
+    # Micrófono Integrado (ADDA Uplink -> UL1 / Capture_1 plughw:0,9)
+    run_mixer("cset numid=29 1")        # UL1_CH1 ADDA_UL_CH1 = on
+    run_mixer("cset numid=32 1")        # UL1_CH2 ADDA_UL_CH2 = on
+    run_mixer("cset numid=243 0")       # ADDA_UL_Mux = MTKAIF
+    run_mixer("cset numid=329 1")       # Mic Type Mux = ACC
+    run_mixer("cset numid=330 2")       # ADC L Mux = Left Preamplifier
+    run_mixer("cset numid=331 2")       # ADC R Mux = Right Preamplifier
+    run_mixer("cset numid=332 1")       # PGA L Mux = AIN0
+    run_mixer("cset numid=333 1")       # PGA R Mux = AIN0
+    run_mixer("cset numid=302 3")       # PGA1 Volume = +18dB
+    run_mixer("cset numid=303 3")       # PGA2 Volume = +18dB
 
 def get_current_volume():
     global last_known_volume

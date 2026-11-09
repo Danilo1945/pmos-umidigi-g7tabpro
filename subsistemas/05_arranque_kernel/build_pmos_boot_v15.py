@@ -125,17 +125,37 @@ ORDERED_EARLY_MODULES = [
     "mtk-pmic-keys.ko",
     "mtk-kpd.ko",
     "tddi_9551.ko", # TDDI Chipone parcheado seguro (fts_disp_notifier y cts_plat_set_reset neutralizados)
-    # Módulos de conectividad base MediaTek
+    # Módulos de conectividad base MediaTek y periféricos adicionales
     "cfg80211.ko",
     "connadp.ko",
     "ccci_util_lib.ko",
     "ccci_auxadc.ko",
+    "mt6577_auxadc.ko",
+    "mt6375-auxadc.ko",
+    "ccci_md_clk.ko",
+    "ccci_rtc.ko",
     "ccmni.ko",
     "mtk_pbm.ko",
     "mtk_mdpm.ko",
     "ccci_md_all.ko",
     "btif_drv.ko",
     "wmt_drv.ko",
+    "bt_drv_connac1x.ko",
+    "gps_pwr.ko",
+    "gps_drv_stp.ko",
+    "fmradio_drv_mt6631_6635.ko",
+    "cqhci.ko",
+    "rpmb-mtk.ko",
+    "mtk-mmc-autok.ko",
+    "mtk-mmc-dbg.ko",
+    "mtk-mmc.ko",
+    "regulator-vibrator.ko",
+    "mtk-pwm.ko",
+    "flashlight.ko",
+    "aw36515.ko",
+    "tcs3724.ko",
+    "hf_manager.ko",
+    "sensorhub.ko",
 ]
 
 def align_4k(size):
@@ -1075,8 +1095,11 @@ for m in \
     snd-soc-audiodsp-common mtk-scp-audio mtk-sp-spk-amp snd-soc-mtk-common \
     mtk-scp-ultra snd-soc-mtk-scp-ultra snd-soc-aw87xxx snd-soc-mt6789-afe \
     mt6358-accdet mtk-btcvsd snd-soc-mt6366 mt6789-mt6366 \
-    cfg80211 connadp ccci_util_lib ccci_auxadc ccmni mtk_pbm mtk_mdpm ccci_md_all \
-    btif_drv wmt_drv; do
+    cfg80211 connadp ccci_util_lib ccci_auxadc mt6577_auxadc mt6375-auxadc ccci_md_clk ccci_rtc \
+    ccmni mtk_pbm mtk_mdpm ccci_md_all \
+    btif_drv wmt_drv bt_drv_connac1x gps_pwr gps_drv_stp fmradio_drv_mt6631_6635 \
+    cqhci rpmb-mtk mtk-mmc-autok mtk-mmc-dbg mtk-mmc \
+    regulator-vibrator mtk-pwm flashlight aw36515 tcs3724 hf_manager sensorhub; do
     load_mod "$m.ko"
 done
 
