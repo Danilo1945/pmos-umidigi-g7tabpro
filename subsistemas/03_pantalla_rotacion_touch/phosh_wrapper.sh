@@ -38,7 +38,15 @@ while [ $count -lt 80 ]; do
 done
 sleep 0.5
 
-# 3. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
+# 3. Propagar entorno completo a D-Bus de sesión para activación de servicios y GNOME Settings
+dbus-update-activation-environment --all 2>/dev/null || true
+
+# 4. Iniciar demonio de RFKILL para control y conmutación de Bluetooth y modo avión
+if ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
+    /usr/libexec/gsd-rfkill >/var/log/gsd-rfkill.log 2>&1 &
+fi
+
+# 5. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
 gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
@@ -46,7 +54,7 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+# 6. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi
