@@ -35,28 +35,29 @@ def run_remote(cmd, ip='172.16.42.1', port=2323, timeout=None):
     import time
     if timeout is None:
         timeout = float(os.environ.get("TABLET_TIMEOUT", 10.0))
-    token = b'__CMD_FINISHED_MARKER__'
+    tok = f"__DONE_{int(time.time()*1000)}__"
+    marker1 = f"\n__MARK_{tok}".encode('utf-8')
+    marker2 = f"\r\n__MARK_{tok}".encode('utf-8')
     for p in [port, 23]:
         try:
-            s = socket.socket()
-            s.settimeout(timeout)
-            s.connect((ip, p))
-            time.sleep(0.1)
+            s = socket.create_connection((ip, p), timeout=3.0)
+            s.settimeout(0.15)
             try:
-                s.recv(1024)
+                s.recv(4096)
             except Exception:
                 pass
-            wrapped_cmd = f"\nexport PAGER=cat; ({cmd})\necho {token.decode()}\n"
+            s.settimeout(timeout)
+            wrapped_cmd = f"export PAGER=cat; ({cmd}); echo __MARK_{tok}\n"
             s.sendall(wrapped_cmd.encode('utf-8'))
             out = b''
             start = time.time()
             while time.time() - start < timeout:
                 try:
-                    chunk = s.recv(4096)
+                    chunk = s.recv(8192)
                     if not chunk:
                         break
                     out += chunk
-                    if token in out:
+                    if marker1 in out or marker2 in out:
                         break
                 except socket.timeout:
                     break
@@ -65,8 +66,8 @@ def run_remote(cmd, ip='172.16.42.1', port=2323, timeout=None):
             ansi_regex = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
             lines = []
             for l in out.decode('utf-8', errors='replace').splitlines():
-                cleaned = ansi_regex.sub('', l)
-                if token.decode() not in cleaned and not cleaned.startswith('export PAGER=cat') and not cleaned.startswith('(') and not cleaned.endswith(f'echo {token.decode()}') and not cleaned.startswith('~ #'):
+                cleaned = ansi_regex.sub('', l).rstrip('\r')
+                if tok not in cleaned and not cleaned.startswith('export PAGER=cat') and not cleaned.startswith('~ #') and not cleaned.startswith('/ #'):
                     lines.append(cleaned)
             return '\n'.join(lines).strip() + '\n'
         except Exception:
