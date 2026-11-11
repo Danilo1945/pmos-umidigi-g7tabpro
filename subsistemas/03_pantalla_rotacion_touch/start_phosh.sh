@@ -209,8 +209,8 @@ export NO_AT_BRIDGE=1
 
 # Compatibilidad estable para clientes GTK4 y Qt6/KDE en Wayland
 export GSK_RENDERER=cairo
-export GDK_DEBUG=gl-disable
 export QT_QUICK_BACKEND=software
+unset GDK_DEBUG
 unset GDK_GL
 unset GDK_RENDERING
 unset GDK_DISABLE
@@ -412,12 +412,16 @@ export WLR_DRM_NO_MODIFIERS=1
 export WLR_DRM_NO_ATOMIC=1
 
 export GDK_BACKEND=wayland
+export GSK_RENDERER=cairo
 export QT_QPA_PLATFORM=wayland
+export QT_QUICK_BACKEND=software
 export SDL_VIDEODRIVER=wayland
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export MOZ_ENABLE_WAYLAND=1
+export NO_AT_BRIDGE=1
+unset GDK_DEBUG
 
 PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so"
 unset LD_PRELOAD

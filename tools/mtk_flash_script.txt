@@ -1,0 +1,4 @@
+wo 0x4ca00000 0x4000000 /home/danilo/Documentos/TABLET/version_v15_estable/pmos_boot_v15.img
+wo 0x2aa00000 0x4000000 /home/danilo/Documentos/TABLET/version_v15_estable/pmos_boot_v15.img
+wo 0x8000 0x80000 /home/danilo/Documentos/TABLET/misc_slot_b_verified.img
+reset

@@ -1457,6 +1457,14 @@ int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t format, uint
     return 1;
 }
 
+__attribute__((visibility("default")))
+int gbm_device_get_format_modifier_plane_count(struct gbm_device *gbm, uint32_t format, uint64_t modifier) {
+    (void)gbm;
+    (void)format;
+    (void)modifier;
+    return 1;
+}
+
 struct gbm_bo *gbm_bo_create(struct gbm_device *gbm,
                              uint32_t width, uint32_t height,
                              uint32_t format, uint32_t flags)
@@ -2231,6 +2239,9 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
                                              0x80E1 /* BGRA */, d->cpu_map, (int)(d->stride / 4), 0, 0);
             }
         }
+        if (((uintptr_t)image & 0xFFFF0000) == 0xE6100000) {
+            return;
+        }
         static void (*real_glTexImage2D_fn)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = NULL;
         if (!real_glTexImage2D_fn) real_glTexImage2D_fn = resolve_mali_gl("glTexImage2D");
         if (real_glTexImage2D_fn) {
@@ -2384,7 +2395,7 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
 {
     static void (*real_fn)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *) = NULL;
     if (!real_fn) real_fn = resolve_mali_gl("glVertexAttribPointer");
-    if (size == 2 && type == 0x1406 /* GL_FLOAT */ && pointer != NULL) {
+    if (index == 0 && size == 2 && type == 0x1406 /* GL_FLOAT */ && pointer != NULL) {
         g_attrib0_ptr = (const float *)pointer;
         g_attrib0_size = size;
         g_attrib0_stride = stride;
@@ -2775,6 +2786,32 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
     }
 }
 
+static void sync_scanout_rect_to_peers(struct dumb_bo_entry *active_d, int rx0, int ry0, int rx1, int ry1) {
+    if (!active_d || !active_d->cpu_map) return;
+    int fb_w = (int)active_d->width;
+    int fb_h = (int)active_d->height;
+    int fb_stride_px = (int)(active_d->stride / 4);
+    int span_w = rx1 - rx0;
+    if (span_w <= 0 || ry1 <= ry0) return;
+    int dst_col_start = fb_w - rx1;
+    if (dst_col_start < 0 || dst_col_start + span_w > fb_w) return;
+    size_t line_bytes = (size_t)span_w * sizeof(uint32_t);
+    const uint32_t *src_base = (const uint32_t *)active_d->cpu_map;
+
+    for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+        struct dumb_bo_entry *peer = &g_dumb_table[i];
+        if (!peer->bo || !peer->cpu_map || peer == active_d) continue;
+        if ((int)peer->width != fb_w || (int)peer->height != fb_h || (int)(peer->stride / 4) != fb_stride_px) continue;
+        uint32_t *dst_base = (uint32_t *)peer->cpu_map;
+        for (int py = ry0; py < ry1; py++) {
+            int target_py = fb_h - 1 - py;
+            if (target_py < 0 || target_py >= fb_h) continue;
+            size_t off = (size_t)target_py * fb_stride_px + dst_col_start;
+            memcpy(dst_base + off, src_base + off, line_bytes);
+        }
+    }
+}
+
 __attribute__((visibility("default")))
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     s_draw_call_counter++;
@@ -2832,6 +2869,8 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
      * fuera del área dañada (ej. PhoshHome cuando solo se actualiza la barra superior). */
     int has_subrects = (mode == 0x0004 /* GL_TRIANGLES */ && count >= 6 && (count % 6) == 0 && g_attrib0_ptr != NULL);
     int num_rects = has_subrects ? (count / 6) : 1;
+    int vert_stride_floats = (g_attrib0_stride > 0) ? (int)(g_attrib0_stride / (int)sizeof(float)) : 2;
+    if (vert_stride_floats < 2) vert_stride_floats = 2;
 
     for (int r = 0; r < num_rects; r++) {
         int rx0 = (x0 > clip_x0) ? x0 : clip_x0;
@@ -2840,11 +2879,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         int ry1 = (y1 < clip_y1) ? y1 : clip_y1;
 
         if (has_subrects) {
-            const float *rv = g_attrib0_ptr + (first + r * 6) * 2;
+            const float *rv = g_attrib0_ptr + (first + r * 6) * vert_stride_floats;
             float r_min_x = 1e9f, r_max_x = -1e9f, r_min_y = 1e9f, r_max_y = -1e9f;
             for (int vi = 0; vi < 6; vi++) {
-                float rvx = rv[vi * 2 + 0];
-                float rvy = rv[vi * 2 + 1];
+                float rvx = rv[vi * vert_stride_floats + 0];
+                float rvy = rv[vi * vert_stride_floats + 1];
                 float ndc_x = rvx * sp->proj[0] + rvy * sp->proj[1] + sp->proj[2];
                 float ndc_y = rvx * sp->proj[3] + rvy * sp->proj[4] + sp->proj[5];
                 float rsx = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
@@ -2898,6 +2937,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     }
                 }
             }
+            sync_scanout_rect_to_peers(d, rx0, ry0, rx1, ry1);
             continue;
         }
 
@@ -2928,28 +2968,35 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
         if (alpha_scale > 256u) alpha_scale = 256u;
 
-        /* Detección de coincidencia 1:1 directa (muy común en Wayland: fondos, ventanas, capas, rotaciones) */
-        int is_1to1 = (fabsf(quad_w - (float)tw) < 1.0f && fabsf(quad_h - (float)th) < 1.0f &&
-                       fabsf(fabsf(u_right - u_left) - 1.0f) < 0.02f &&
-                       fabsf(fabsf(v_bottom - v_top) - 1.0f) < 0.02f);
+        /* Detección de coincidencia 1:1 en escala de píxeles (incluyendo sub-regiones UV de ventanas GTK4/libadwaita con sombras) */
+        float src_sub_w = (u_right - u_left) * (float)tw;
+        float src_sub_h = (v_bottom - v_top) * (float)th;
+        int is_1to1 = (u_right > u_left && v_bottom > v_top &&
+                       fabsf(quad_w - src_sub_w) < 1.5f &&
+                       fabsf(quad_h - src_sub_h) < 1.5f);
 
         if (is_1to1) {
             int base_x = (int)(min_sx + 0.5f);
             int base_y = (int)(min_sy + 0.5f);
+            int u_off_px = (int)(u_left * (float)tw + 0.5f);
+            int v_off_px = (int)(v_top * (float)th + 0.5f);
 
-            int tx_start = rx0 - base_x;
+            int tx_start = u_off_px + (rx0 - base_x);
             int span_w = rx1 - rx0;
+            int dst_rx0 = rx0;
             if (tx_start < 0) {
                 span_w += tx_start;
+                dst_rx0 -= tx_start;
                 tx_start = 0;
             }
             if (tx_start + span_w > tw) span_w = tw - tx_start;
             if (span_w <= 0) continue;
 
-            int dst_col_start = fb_w - (rx0 + span_w);
+            int dst_col_start = fb_w - (dst_rx0 + span_w);
+            if (dst_col_start < 0 || dst_col_start + span_w > fb_w) continue;
 
             for (int py = ry0; py < ry1; py++) {
-                int row_rel = py - base_y;
+                int row_rel = v_off_px + (py - base_y);
                 if (row_rel < 0 || row_rel >= th) continue;
                 const uint32_t *src_row = st->pixels + row_rel * tw;
 
@@ -2965,14 +3012,21 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     blend_row_neon_rev_alpha(dst_row + dst_col_start, src_end, span_w, alpha_scale);
                 }
             }
+            sync_scanout_rect_to_peers(d, dst_rx0, ry0, dst_rx0 + span_w, ry1);
             continue;
         }
 
-        /* Caso con escalado: Aritmética de punto fijo 16.16 (sin punto flotante por píxel) */
+        /* Caso con escalado: Aritmética de punto fijo 16.16 con recolección en buffer lineal y mezcla NEON */
         float inv_qw = 1.0f / quad_w;
         float inv_qh = 1.0f / quad_h;
         float u_span = (u_right - u_left) * (float)tw;
         int32_t step_u_fp = (int32_t)(u_span * inv_qw * 65536.0f);
+        int span_w = rx1 - rx0;
+        if (span_w <= 0 || span_w > 2048) continue;
+        int dst_col_start = fb_w - rx1;
+        if (dst_col_start < 0 || dst_col_start + span_w > fb_w) continue;
+
+        uint32_t scaled_row[2048];
 
         for (int py = ry0; py < ry1; py++) {
             float fy = ((float)py + 0.5f - min_sy) * inv_qh;
@@ -2982,33 +3036,34 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             const uint32_t *src_row = st->pixels + ty * tw;
 
             int target_py = fb_h - 1 - py;
-            uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+            uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
 
             float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
             int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
 
-            for (int px = rx0; px < rx1; px++) {
-                int tx = u_curr_fp >> 16;
-                u_curr_fp += step_u_fp;
-                if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
-
-                int target_px = (fb_w - 1) - px;
-                uint32_t spx = src_row[tx];
-                if (is_opaque_shader && alpha_scale >= 255u) {
-                    dst_row[target_px] = spx | 0xFF000000u;
+            if (is_opaque_shader && alpha_scale >= 255u) {
+                for (int i = 0; i < span_w; i++) {
+                    int tx = u_curr_fp >> 16;
+                    u_curr_fp += step_u_fp;
+                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                    dst_row[span_w - 1 - i] = src_row[tx] | 0xFF000000u;
+                }
+            } else {
+                uint32_t or_mask = (sp->is_tex == 2) ? 0xFF000000u : 0u;
+                for (int i = 0; i < span_w; i++) {
+                    int tx = u_curr_fp >> 16;
+                    u_curr_fp += step_u_fp;
+                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                    scaled_row[span_w - 1 - i] = src_row[tx] | or_mask;
+                }
+                if (alpha_scale >= 255u) {
+                    blend_row_neon(dst_row, scaled_row, span_w);
                 } else {
-                    if (sp->is_tex == 2) spx |= 0xFF000000u;
-                    if (alpha_scale < 255u) {
-                        uint32_t sa = (((spx >> 24) & 0xFFu) * alpha_scale) >> 8;
-                        uint32_t sr = (((spx >> 16) & 0xFFu) * alpha_scale) >> 8;
-                        uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
-                        uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
-                        spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
-                    }
-                    dst_row[target_px] = blend_premult_argb(spx, dst_row[target_px]);
+                    blend_row_neon_alpha(dst_row, scaled_row, span_w, alpha_scale);
                 }
             }
         }
+        sync_scanout_rect_to_peers(d, rx0, ry0, rx1, ry1);
     }
 }
 
@@ -3052,6 +3107,7 @@ void glClear(unsigned int mask) {
                 row[x] = col;
             }
         }
+        sync_scanout_rect_to_peers(d, cx0, cy0, cx1, cy1);
         return;
     }
     if (!real_glClear) {
@@ -3203,7 +3259,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
                 matched_entry = find_dumb_bo_by_handle_locked(q_h);
             }
         }
-        if (!matched_entry && w > 0 && h > 0) {
+        if (!matched_entry && w == 1200 && h == 1920) {
             for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
                 if (g_dumb_table[i].bo && g_dumb_table[i].width == w && g_dumb_table[i].height == h) {
                     matched_entry = &g_dumb_table[i];
@@ -3216,6 +3272,41 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
             dma_fd = matched_entry->prime_fd;
         }
         pthread_mutex_unlock(&g_dumb_mutex);
+
+        /* Vía rápida para DMA-BUFs de clientes Wayland (ej. ventanas GTK4/Cairo): mapear directo a CPU sin pasar por libmali */
+        if (!matched_entry && dma_fd >= 0 && w > 0 && h > 0 && stride > 0) {
+            size_t map_sz = (size_t)stride * (size_t)h;
+            void *cpu_ptr = mmap(NULL, map_sz, PROT_READ, MAP_SHARED, dma_fd, 0);
+            if (cpu_ptr && cpu_ptr != MAP_FAILED) {
+                static struct dumb_bo_entry s_client_dmabuf_pool[64];
+                static int s_client_pool_idx = 0;
+                int pool_slot = -1;
+                for (int pi = 0; pi < 64; pi++) {
+                    if (s_client_dmabuf_pool[pi].bo == NULL) {
+                        pool_slot = pi;
+                        break;
+                    }
+                }
+                if (pool_slot < 0) {
+                    pool_slot = (s_client_pool_idx++) % 64;
+                }
+                struct dumb_bo_entry *cde = &s_client_dmabuf_pool[pool_slot];
+                if (cde->cpu_map && cde->cpu_map != cpu_ptr) {
+                    munmap(cde->cpu_map, (size_t)cde->stride * cde->height);
+                }
+                cde->width = w;
+                cde->height = h;
+                cde->stride = stride;
+                cde->cpu_map = cpu_ptr;
+                cde->prime_fd = dma_fd;
+                cde->bo = (struct gbm_bo *)cde;
+
+                static uint64_t s_dmabuf_dummy_handle = 0xE6100000ULL;
+                EGLImageKHR c_img = (EGLImageKHR)(uintptr_t)(++s_dmabuf_dummy_handle);
+                register_egl_image_dumb(c_img, cde);
+                return c_img;
+            }
+        }
 
         /* Intento 1: Llamada directa a libmali con atributos originales de wlroots */
         if (real_eglCreateImageKHR) {
@@ -3234,13 +3325,13 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
         }
         patched_attribs[count] = EGL_NONE;
 
-        kmsg_always("[GPU-EGL] >>> eglCreateImageKHR(DMA_BUF): %ux%u, format=0x%x, fd=%d, stride=%u -> mod=LINEAR\n",
+        kmsg_log("[GPU-EGL] >>> eglCreateImageKHR(DMA_BUF): %ux%u, format=0x%x, fd=%d, stride=%u -> mod=LINEAR\n",
                  w, h, fourcc, dma_fd, stride);
         EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, patched_attribs) : NULL;
 
         /* Fallback nativo Mali: Si DMA_BUF import falla, importar vía EGL_NATIVE_PIXMAP_KHR sobre el BO de Mali */
         if (!img && matched_entry && matched_entry->bo) {
-            kmsg_always("[GPU-EGL] Fallback DMA_BUF -> EGL_NATIVE_PIXMAP_KHR con bo=%p\n", (void*)matched_entry->bo);
+            kmsg_log("[GPU-EGL] Fallback DMA_BUF -> EGL_NATIVE_PIXMAP_KHR con bo=%p\n", (void*)matched_entry->bo);
             img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)matched_entry->bo, NULL) : NULL;
         }
 
@@ -3249,9 +3340,18 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
             size_t map_sz = (size_t)stride * (size_t)h;
             void *cpu_ptr = mmap(NULL, map_sz, PROT_READ, MAP_SHARED, dma_fd, 0);
             if (cpu_ptr && cpu_ptr != MAP_FAILED) {
-                static struct dumb_bo_entry s_client_dmabuf_pool[32];
+                static struct dumb_bo_entry s_client_dmabuf_pool[64];
                 static int s_client_pool_idx = 0;
-                int pool_slot = (s_client_pool_idx++) % 32;
+                int pool_slot = -1;
+                for (int pi = 0; pi < 64; pi++) {
+                    if (s_client_dmabuf_pool[pi].bo == NULL) {
+                        pool_slot = pi;
+                        break;
+                    }
+                }
+                if (pool_slot < 0) {
+                    pool_slot = (s_client_pool_idx++) % 64;
+                }
                 struct dumb_bo_entry *cde = &s_client_dmabuf_pool[pool_slot];
                 if (cde->cpu_map && cde->cpu_map != cpu_ptr) {
                     munmap(cde->cpu_map, (size_t)cde->stride * cde->height);
@@ -3266,17 +3366,17 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
                 static uint64_t s_dmabuf_dummy_handle = 0xE6100000ULL;
                 img = (EGLImageKHR)(uintptr_t)(++s_dmabuf_dummy_handle);
                 register_egl_image_dumb(img, cde);
-                kmsg_always("[GPU-EGL] Fallback DMA-BUF mapeado por CPU mmap: img=%p, %ux%u stride=%u ptr=%p\n",
-                            (void*)img, w, h, stride, cpu_ptr);
+                kmsg_log("[GPU-EGL] Fallback DMA-BUF mapeado por CPU mmap: img=%p, %ux%u stride=%u ptr=%p\n",
+                         (void*)img, w, h, stride, cpu_ptr);
             }
         }
 
         if (img && matched_entry) register_egl_image_dumb(img, matched_entry);
-        kmsg_always("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
+        kmsg_log("[GPU-EGL] <<< eglCreateImageKHR(DMA_BUF) RET=%p\n", (void*)img);
         return img;
     }
 
-    kmsg_always("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
+    kmsg_log("[GPU-EGL] >>> eglCreateImageKHR: target=0x%x, buf=%p\n", target, (void*)buffer);
     EGLImageKHR img = real_eglCreateImageKHR ? real_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list) : NULL;
     if (img && target == EGL_NATIVE_PIXMAP_KHR && buffer) {
         pthread_mutex_lock(&g_dumb_mutex);
@@ -3284,7 +3384,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
         pthread_mutex_unlock(&g_dumb_mutex);
         if (de) register_egl_image_dumb(img, de);
     }
-    kmsg_always("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
+    kmsg_log("[GPU-EGL] <<< eglCreateImageKHR RET=%p\n", (void*)img);
     return img;
 }
 
@@ -3294,6 +3394,12 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR img) {
     if (((uintptr_t)img & 0xFFFF0000) == 0xE6100000) {
         for (int i = 0; i < MAX_EGL_IMG_MAP; i++) {
             if (g_egl_img_map[i].img == (void*)img) {
+                struct dumb_bo_entry *cde = g_egl_img_map[i].dumb;
+                if (cde && cde->bo == (struct gbm_bo *)cde && cde->cpu_map) {
+                    munmap(cde->cpu_map, (size_t)cde->stride * cde->height);
+                    cde->cpu_map = NULL;
+                    cde->bo = NULL;
+                }
                 g_egl_img_map[i].img = NULL;
                 g_egl_img_map[i].dumb = NULL;
                 break;

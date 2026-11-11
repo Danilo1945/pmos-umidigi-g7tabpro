@@ -415,13 +415,6 @@ def prepare_initramfs_v9(output_gz_path):
         os.chmod(os.path.join(workdir, "bin", "battery_daemon"), 0o755)
         print(f"  [+] battery_daemon instalado en initramfs")
 
-    bat_py_src = os.path.join(repo_dir, "subsistemas/02_bateria_energia/tablet_battery_daemon.py")
-    if os.path.exists(bat_py_src):
-        os.makedirs(os.path.join(workdir, "bin"), exist_ok=True)
-        shutil.copy2(bat_py_src, os.path.join(workdir, "bin", "tablet_battery_daemon.py"))
-        os.chmod(os.path.join(workdir, "bin", "tablet_battery_daemon.py"), 0o755)
-        print(f"  [+] tablet_battery_daemon.py instalado en initramfs")
-
     phoc_src = os.path.join(repo_dir, "subsistemas/03_pantalla_rotacion_touch/phoc.ini")
     if os.path.exists(phoc_src):
         os.makedirs(os.path.join(workdir, "etc"), exist_ok=True)
@@ -1355,8 +1348,7 @@ if [ -d /sysroot/usr/bin ]; then
         cp -f /bin/start_phosh.sh /sysroot/usr/bin/start_phosh.sh 2>/dev/null || true
         cp -f /bin/phosh_wrapper.sh /sysroot/usr/bin/phosh_wrapper.sh 2>/dev/null || true
         cp -f /bin/tablet_bt_daemon.py /sysroot/usr/bin/tablet_bt_daemon.py 2>/dev/null || true
-        cp -f /bin/battery_daemon /sysroot/usr/bin/battery_daemon 2>/dev/null || true
-        cp -f /bin/tablet_battery_daemon.py /sysroot/usr/bin/tablet_battery_daemon.py 2>/dev/null || true
+        rm -f /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_battery_daemon.py /bin/tablet_battery_daemon.py 2>/dev/null || true
         cp -f /bin/upower_battery_provider.py /sysroot/usr/bin/upower_battery_provider.py 2>/dev/null || true
         cp -f /bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_audio_daemon.py 2>/dev/null || true
         cp -f /bin/tablet_audio_daemon.py /sysroot/usr/local/bin/tablet_audio_daemon.py 2>/dev/null || true
@@ -1367,7 +1359,7 @@ if [ -d /sysroot/usr/bin ]; then
         cp -f /etc/wireplumber/50-alsa-fix.conf /sysroot/etc/wireplumber/wireplumber.conf.d/50-alsa-fix.conf 2>/dev/null || true
         cp -f /etc/pipewire/10-alsa.conf /sysroot/etc/pipewire/pipewire.conf.d/10-alsa.conf 2>/dev/null || true
         cp -f /etc/alsa-card-profile/analog-output-headphones.conf /sysroot/usr/share/alsa-card-profile/mixer/paths/analog-output-headphones.conf 2>/dev/null || true
-        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/phosh_wrapper.sh /sysroot/usr/bin/battery_daemon /sysroot/usr/bin/tablet_battery_daemon.py /sysroot/usr/bin/upower_battery_provider.py /sysroot/usr/bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
+        chmod 755 /sysroot/usr/lib/libseat_direct.so /sysroot/usr/lib/libgpu_interface_driver.so /sysroot/usr/bin/load_mali_chain.sh /sysroot/usr/bin/panel_pwm_force /sysroot/usr/bin/start_phosh_service.sh /sysroot/usr/bin/start_phosh.sh /sysroot/usr/bin/phosh_wrapper.sh /sysroot/usr/bin/upower_battery_provider.py /sysroot/usr/bin/tablet_audio_daemon.py /sysroot/usr/bin/tablet_power_daemon.py 2>/dev/null || true
 
         mkdir -p /sysroot/etc/dbus-1/system.d
         cat << 'DBUSEOF' > /sysroot/etc/dbus-1/system.d/net.hadess.SensorProxy.conf

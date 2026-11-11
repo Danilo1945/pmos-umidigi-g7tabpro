@@ -17,7 +17,10 @@ export NO_AT_BRIDGE=1
 
 # Clientes GTK4 y Qt6 renderizan en SHM Wayland y Phoc compone por GPU Mali-G57
 export GSK_RENDERER=cairo
-export GDK_DEBUG=gl-disable
+unset GDK_DEBUG
+unset GDK_GL
+unset GDK_RENDERING
+unset GDK_DISABLE
 
 # 1. Esperar disponibilidad del socket Wayland de Phoc
 count=0
