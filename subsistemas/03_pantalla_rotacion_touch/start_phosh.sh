@@ -210,6 +210,7 @@ export NO_AT_BRIDGE=1
 # Compatibilidad estable para clientes GTK4 y Qt6/KDE en Wayland
 export GSK_RENDERER=cairo
 export QT_QUICK_BACKEND=software
+export QTWEBENGINE_DISABLE_SANDBOX=1
 unset GDK_DEBUG
 unset GDK_GL
 unset GDK_RENDERING
@@ -238,11 +239,51 @@ sleep 0.5
 cat << 'EOF_ENV' > /etc/profile.d/phosh-cairo.sh
 export GSK_RENDERER=cairo
 export QT_QUICK_BACKEND=software
+export QTWEBENGINE_DISABLE_SANDBOX=1
 export NO_AT_BRIDGE=1
 EOF_ENV
+mkdir -p /usr/local/bin /etc/mpv /tmp/runtime-danilo 2>/dev/null || true
+chown 10000:10000 /tmp/runtime-danilo 2>/dev/null || true
+chmod 700 /tmp/runtime-danilo 2>/dev/null || true
+chmod 755 /tmp/runtime-root 2>/dev/null || true
+chmod 777 /tmp/runtime-root/wayland-* 2>/dev/null || true
+ln -sf /tmp/runtime-root/wayland-0 /tmp/runtime-danilo/wayland-0 2>/dev/null || true
+cat << 'EOF_MPV' > /etc/mpv/mpv.conf
+vo=wlshm
+ao=pipewire,alsa
+EOF_MPV
+cat << 'EOF_GCC' > /usr/local/bin/gnome-control-center
+#!/bin/sh
+export XDG_CURRENT_DESKTOP=GNOME
+export GSK_RENDERER=cairo
+exec /usr/bin/gnome-control-center "$@"
+EOF_GCC
+cat << 'EOF_GSW' > /usr/local/bin/gnome-software
+#!/bin/sh
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p /tmp/runtime-danilo
+    chown 10000:10000 /tmp/runtime-danilo
+    chmod 700 /tmp/runtime-danilo
+    chmod 755 /tmp/runtime-root 2>/dev/null || true
+    chmod 777 /tmp/runtime-root/wayland-* 2>/dev/null || true
+    ln -sf /tmp/runtime-root/wayland-0 /tmp/runtime-danilo/wayland-0
+    exec su -s /bin/sh danilo -c "
+        export HOME=/home/danilo
+        export USER=danilo
+        export XDG_RUNTIME_DIR=/tmp/runtime-danilo
+        export WAYLAND_DISPLAY=wayland-0
+        export GDK_BACKEND=wayland
+        export GSK_RENDERER=cairo
+        export NO_AT_BRIDGE=1
+        exec dbus-run-session -- /usr/bin/gnome-software \"\$@\"
+    " -- "$@"
+fi
+exec /usr/bin/gnome-software "$@"
+EOF_GSW
+chmod 755 /usr/local/bin/gnome-control-center /usr/local/bin/gnome-software 2>/dev/null || true
 dbus-update-activation-environment --all 2>/dev/null || true
-dbus-update-activation-environment --systemd GSK_RENDERER=cairo GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root XDG_CURRENT_DESKTOP=GNOME:Phosh XDG_SESSION_DESKTOP=phosh NO_AT_BRIDGE=1 2>/dev/null || true
-gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.UpdateActivationEnvironment "{'GSK_RENDERER': 'cairo', 'GDK_BACKEND': 'wayland', 'WAYLAND_DISPLAY': 'wayland-0', 'XDG_RUNTIME_DIR': '/tmp/runtime-root', 'XDG_CURRENT_DESKTOP': 'GNOME:Phosh', 'XDG_SESSION_DESKTOP': 'phosh', 'NO_AT_BRIDGE': '1'}" >/dev/null 2>&1 || true
+dbus-update-activation-environment --systemd GSK_RENDERER=cairo QTWEBENGINE_DISABLE_SANDBOX=1 GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root XDG_CURRENT_DESKTOP=GNOME:Phosh XDG_SESSION_DESKTOP=phosh NO_AT_BRIDGE=1 2>/dev/null || true
+gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.UpdateActivationEnvironment "{'GSK_RENDERER': 'cairo', 'QTWEBENGINE_DISABLE_SANDBOX': '1', 'GDK_BACKEND': 'wayland', 'WAYLAND_DISPLAY': 'wayland-0', 'XDG_RUNTIME_DIR': '/tmp/runtime-root', 'XDG_CURRENT_DESKTOP': 'GNOME:Phosh', 'XDG_SESSION_DESKTOP': 'phosh', 'NO_AT_BRIDGE': '1'}" >/dev/null 2>&1 || true
 
 # 4. Iniciar demonio de RFKILL para control y conmutación de Bluetooth y modo avión
 if ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
@@ -255,6 +296,8 @@ gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null |
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
+gsettings set org.gnome.desktop.interface show-battery-percentage true 2>/dev/null || true
+dconf write /org/gnome/desktop/interface/show-battery-percentage true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
 # 6. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
