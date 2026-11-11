@@ -1951,6 +1951,13 @@ static int g_pending_gpu_clear = 0;
 static const float *g_attrib0_ptr = NULL;
 static GLint g_attrib0_size = 2;
 static GLsizei g_attrib0_stride = 0;
+static GLuint g_bound_vbo = 0;
+#define MAX_SHADOW_VBOS 256
+struct shadow_vbo {
+    uint8_t *data;
+    size_t size;
+};
+static struct shadow_vbo g_shadow_vbo[MAX_SHADOW_VBOS];
 
 static void register_egl_image_dumb(void *img, struct dumb_bo_entry *dumb) {
     if (!img || !dumb) return;
@@ -1974,18 +1981,22 @@ static struct dumb_bo_entry *find_egl_image_dumb(void *img) {
 }
 
 static struct dumb_bo_entry *get_active_fbo_dumb(void) {
-    if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS) {
-        GLuint rbo = g_fbo_rbo[g_bound_fbo];
-        if (rbo > 0 && rbo < MAX_SHADOW_RBOS && g_rbo_dumb[rbo]) {
-            return g_rbo_dumb[rbo];
-        }
-        /* En wlroots gles2, cada FBO de scanout (1, 2, 3...) corresponde secuencialmente a los dumb_bo de scanout (0, 1, 2...) */
-        int idx = (int)g_bound_fbo - 1;
-        if (idx >= 0 && idx < MAX_DUMB_ENTRIES && g_dumb_table[idx].bo && g_dumb_table[idx].cpu_map) {
-            return &g_dumb_table[idx];
+    /* Usar una superficie shadow offscreen en RAM cacheada para componer el cuadro completo
+     * sin tocar ningún buffer KMS de scanout mientras el controlador DSI está escaneando.
+     * En drmModePageFlip volcaremos atómicamente este buffer completo al buffer KMS destino. */
+    static struct dumb_bo_entry s_shadow_scanout = {0};
+    if (!s_shadow_scanout.cpu_map) {
+        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+            if (g_dumb_table[i].bo && g_dumb_table[i].width == 1200 && g_dumb_table[i].height == 1920) {
+                s_shadow_scanout = g_dumb_table[i];
+                s_shadow_scanout.cpu_map = calloc(1, (size_t)s_shadow_scanout.size);
+                break;
+            }
         }
     }
-    /* Fallback: devolver el primer dumb_bo con cpu_map válido */
+    if (s_shadow_scanout.cpu_map) {
+        return &s_shadow_scanout;
+    }
     for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
         if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map) {
             return &g_dumb_table[i];
@@ -2115,8 +2126,6 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
             convert_and_store_tex_region(st, 0, 0, width, height, format, pixels,
                                          g_unpack_row_length, g_unpack_skip_pixels, g_unpack_skip_rows);
         }
-        kmsg_log("[GPU-TEX] glTexImage2D tex=%u %dx%d fmt=0x%x row_len=%d pixels=%p\n",
-                 g_bound_tex, width, height, format, g_unpack_row_length, pixels);
         return;
     }
     if (real_fn) real_fn(target, level, internalformat, width, height, border, format, type, pixels);
@@ -2235,8 +2244,10 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
                 st->height = (int)d->height;
             }
             if (st->pixels) {
+                /* DRM_FORMAT_ABGR8888 (0x34324241) o DRM_FORMAT_XBGR8888 (0x34324258) corresponden a GL_RGBA (0x1908) en little-endian */
+                GLenum gl_fmt = (d->format == 0x34324241 || d->format == 0x34324258) ? 0x1908 /* GL_RGBA */ : 0x80E1 /* GL_BGRA_EXT */;
                 convert_and_store_tex_region(st, 0, 0, (int)d->width, (int)d->height,
-                                             0x80E1 /* BGRA */, d->cpu_map, (int)(d->stride / 4), 0, 0);
+                                             gl_fmt, d->cpu_map, (int)(d->stride / 4), 0, 0);
             }
         }
         if (((uintptr_t)image & 0xFFFF0000) == 0xE6100000) {
@@ -2390,13 +2401,63 @@ void glUniform1f(GLint location, GLfloat v0) {
 }
 
 __attribute__((visibility("default")))
+void glBindBuffer(GLenum target, GLuint buffer) {
+    static void (*real_fn)(GLenum, GLuint) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBindBuffer");
+    if (target == 0x8892 /* GL_ARRAY_BUFFER */) {
+        g_bound_vbo = buffer;
+    }
+    if (real_fn) real_fn(target, buffer);
+}
+
+__attribute__((visibility("default")))
+void glBufferData(GLenum target, ptrdiff_t size, const void *data, GLenum usage) {
+    static void (*real_fn)(GLenum, ptrdiff_t, const void *, GLenum) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBufferData");
+    if (target == 0x8892 /* GL_ARRAY_BUFFER */ && g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS && size > 0) {
+        if (g_shadow_vbo[g_bound_vbo].size < (size_t)size) {
+            free(g_shadow_vbo[g_bound_vbo].data);
+            g_shadow_vbo[g_bound_vbo].data = (uint8_t *)malloc((size_t)size);
+            g_shadow_vbo[g_bound_vbo].size = (size_t)size;
+        }
+        if (data && g_shadow_vbo[g_bound_vbo].data) {
+            memcpy(g_shadow_vbo[g_bound_vbo].data, data, (size_t)size);
+        }
+    }
+    if (real_fn) real_fn(target, size, data, usage);
+}
+
+__attribute__((visibility("default")))
+void glBufferSubData(GLenum target, ptrdiff_t offset, ptrdiff_t size, const void *data) {
+    static void (*real_fn)(GLenum, ptrdiff_t, ptrdiff_t, const void *) = NULL;
+    if (!real_fn) real_fn = resolve_mali_gl("glBufferSubData");
+    if (target == 0x8892 /* GL_ARRAY_BUFFER */ && g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS &&
+        data && offset >= 0 && size > 0 && (size_t)(offset + size) <= g_shadow_vbo[g_bound_vbo].size &&
+        g_shadow_vbo[g_bound_vbo].data) {
+        memcpy(g_shadow_vbo[g_bound_vbo].data + offset, data, (size_t)size);
+    }
+    if (real_fn) real_fn(target, offset, size, data);
+}
+
+__attribute__((visibility("default")))
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
                            GLsizei stride, const void *pointer)
 {
     static void (*real_fn)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *) = NULL;
     if (!real_fn) real_fn = resolve_mali_gl("glVertexAttribPointer");
-    if (index == 0 && size == 2 && type == 0x1406 /* GL_FLOAT */ && pointer != NULL) {
-        g_attrib0_ptr = (const float *)pointer;
+    if (index == 0 && size == 2 && type == 0x1406 /* GL_FLOAT */) {
+        if (g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS && g_shadow_vbo[g_bound_vbo].data) {
+            uintptr_t off = (uintptr_t)pointer;
+            if (off < g_shadow_vbo[g_bound_vbo].size) {
+                g_attrib0_ptr = (const float *)(g_shadow_vbo[g_bound_vbo].data + off);
+            } else {
+                g_attrib0_ptr = NULL;
+            }
+        } else if ((uintptr_t)pointer >= 0x10000ULL) {
+            g_attrib0_ptr = (const float *)pointer;
+        } else {
+            g_attrib0_ptr = NULL;
+        }
         g_attrib0_size = size;
         g_attrib0_stride = stride;
     }
@@ -2438,15 +2499,19 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
 
         uint32_t *dst32 = (uint32_t *)pixels;
         int is_rgba = (format == 0x1908 /* GL_RGBA */);
+        int fb_w = (int)d->width;
+        int fb_h = (int)d->height;
         for (int row = 0; row < height; row++) {
-            int sy = y + row;
-            if (sy < 0 || sy >= (int)d->height) continue;
-            const uint32_t *src_row = src_base + sy * stride_px;
+            int py = y + row;
+            if (py < 0 || py >= fb_h) continue;
+            int target_py = fb_h - 1 - py;
+            const uint32_t *src_row = src_base + target_py * stride_px;
             uint32_t *dst_row = dst32 + row * width;
             for (int col = 0; col < width; col++) {
-                int sx = x + col;
-                if (sx < 0 || sx >= (int)d->width) continue;
-                uint32_t px = src_row[sx]; /* 0xAARRGGBB */
+                int px_x = x + col;
+                if (px_x < 0 || px_x >= fb_w) continue;
+                int target_px = fb_w - 1 - px_x;
+                uint32_t px = src_row[target_px]; /* 0xAARRGGBB */
                 if (is_rgba) {
                     uint32_t a = px & 0xFF000000u;
                     uint32_t r = (px >> 16) & 0xFFu;
@@ -2787,29 +2852,7 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
 }
 
 static void sync_scanout_rect_to_peers(struct dumb_bo_entry *active_d, int rx0, int ry0, int rx1, int ry1) {
-    if (!active_d || !active_d->cpu_map) return;
-    int fb_w = (int)active_d->width;
-    int fb_h = (int)active_d->height;
-    int fb_stride_px = (int)(active_d->stride / 4);
-    int span_w = rx1 - rx0;
-    if (span_w <= 0 || ry1 <= ry0) return;
-    int dst_col_start = fb_w - rx1;
-    if (dst_col_start < 0 || dst_col_start + span_w > fb_w) return;
-    size_t line_bytes = (size_t)span_w * sizeof(uint32_t);
-    const uint32_t *src_base = (const uint32_t *)active_d->cpu_map;
-
-    for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-        struct dumb_bo_entry *peer = &g_dumb_table[i];
-        if (!peer->bo || !peer->cpu_map || peer == active_d) continue;
-        if ((int)peer->width != fb_w || (int)peer->height != fb_h || (int)(peer->stride / 4) != fb_stride_px) continue;
-        uint32_t *dst_base = (uint32_t *)peer->cpu_map;
-        for (int py = ry0; py < ry1; py++) {
-            int target_py = fb_h - 1 - py;
-            if (target_py < 0 || target_py >= fb_h) continue;
-            size_t off = (size_t)target_py * fb_stride_px + dst_col_start;
-            memcpy(dst_base + off, src_base + off, line_bytes);
-        }
-    }
+    (void)active_d; (void)rx0; (void)ry0; (void)rx1; (void)ry1;
 }
 
 __attribute__((visibility("default")))
@@ -2884,6 +2927,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             for (int vi = 0; vi < 6; vi++) {
                 float rvx = rv[vi * vert_stride_floats + 0];
                 float rvy = rv[vi * vert_stride_floats + 1];
+                if (rvx < -0.5f || rvx > 1.5f || rvy < -0.5f || rvy > 1.5f || rvx != rvx || rvy != rvy) {
+                    r_min_x = 1e9f; r_max_x = -1e9f;
+                    break;
+                }
                 float ndc_x = rvx * sp->proj[0] + rvy * sp->proj[1] + sp->proj[2];
                 float ndc_y = rvx * sp->proj[3] + rvy * sp->proj[4] + sp->proj[5];
                 float rsx = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
@@ -2893,14 +2940,18 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                 if (rsy < r_min_y) r_min_y = rsy;
                 if (rsy > r_max_y) r_max_y = rsy;
             }
-            int sx0 = (int)(r_min_x + 0.5f);
-            int sx1 = (int)(r_max_x + 0.5f);
-            int sy0 = (int)(r_min_y + 0.5f);
-            int sy1 = (int)(r_max_y + 0.5f);
-            if (sx0 > rx0) rx0 = sx0;
-            if (sy0 > ry0) ry0 = sy0;
-            if (sx1 < rx1) rx1 = sx1;
-            if (sy1 < ry1) ry1 = sy1;
+            if (r_min_x <= r_max_x && r_min_y <= r_max_y) {
+                int sx0 = (int)(r_min_x + 0.5f);
+                int sx1 = (int)(r_max_x + 0.5f);
+                int sy0 = (int)(r_min_y + 0.5f);
+                int sy1 = (int)(r_max_y + 0.5f);
+                if (sx0 > rx0) rx0 = sx0;
+                if (sy0 > ry0) ry0 = sy0;
+                if (sx1 < rx1) rx1 = sx1;
+                if (sy1 < ry1) ry1 = sy1;
+            } else if (r > 0) {
+                continue;
+            }
         }
 
         if (rx0 >= rx1 || ry0 >= ry1) continue;
@@ -3260,12 +3311,18 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
             }
         }
         if (!matched_entry && w == 1200 && h == 1920) {
+            static int s_scanout_match_idx = 0;
+            int found = 0;
             for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-                if (g_dumb_table[i].bo && g_dumb_table[i].width == w && g_dumb_table[i].height == h) {
-                    matched_entry = &g_dumb_table[i];
+                int idx = (s_scanout_match_idx + i) % MAX_DUMB_ENTRIES;
+                if (g_dumb_table[idx].bo && g_dumb_table[idx].width == w && g_dumb_table[idx].height == h) {
+                    matched_entry = &g_dumb_table[idx];
+                    s_scanout_match_idx = (idx + 1) % MAX_DUMB_ENTRIES;
+                    found = 1;
                     break;
                 }
             }
+            (void)found;
         }
         if (matched_entry && fd_idx >= 0 && fcntl(dma_fd, F_GETFD) < 0 && matched_entry->prime_fd >= 0) {
             patched_attribs[fd_idx] = matched_entry->prime_fd;
@@ -3297,6 +3354,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, unsigned int targe
                 cde->width = w;
                 cde->height = h;
                 cde->stride = stride;
+                cde->format = fourcc;
                 cde->cpu_map = cpu_ptr;
                 cde->prime_fd = dma_fd;
                 cde->bo = (struct gbm_bo *)cde;
@@ -3596,6 +3654,9 @@ void *eglGetProcAddress(const char *procname) {
     if (strcmp(procname, "glUniformMatrix3fv") == 0) return (void *)glUniformMatrix3fv;
     if (strcmp(procname, "glUniform4f") == 0) return (void *)glUniform4f;
     if (strcmp(procname, "glUniform1f") == 0) return (void *)glUniform1f;
+    if (strcmp(procname, "glBindBuffer") == 0) return (void *)glBindBuffer;
+    if (strcmp(procname, "glBufferData") == 0) return (void *)glBufferData;
+    if (strcmp(procname, "glBufferSubData") == 0) return (void *)glBufferSubData;
     if (strcmp(procname, "glVertexAttribPointer") == 0) return (void *)glVertexAttribPointer;
     if (strcmp(procname, "glReadPixels") == 0) return (void *)glReadPixels;
     if (strcmp(procname, "glClearColor") == 0) return (void *)glClearColor;
@@ -3691,6 +3752,16 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
         kmsg_log("[GPU-KMS] drmModeSetCrtc: safe_drm_set_master(fd=%d) -> ret=%d (errno=%d)\n",
                  fd, mret, mret < 0 ? errno : 0);
     }
+    struct dumb_bo_entry *sh = get_active_fbo_dumb();
+    if (sh && sh->cpu_map && sh->size > 0) {
+        pthread_mutex_lock(&g_dumb_mutex);
+        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+            if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].size == sh->size) {
+                memcpy(g_dumb_table[i].cpu_map, sh->cpu_map, (size_t)sh->size);
+            }
+        }
+        pthread_mutex_unlock(&g_dumb_mutex);
+    }
     static int (*real_drmModeSetCrtc)(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *, int, drmModeModeInfoPtr) = NULL;
     if (!real_drmModeSetCrtc) {
         real_drmModeSetCrtc = dlsym(RTLD_NEXT, "drmModeSetCrtc");
@@ -3706,12 +3777,30 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
     return ret;
 }
 
+static uint32_t g_fb_id_to_handle[256] = {0};
+
 int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
                     uint32_t flags, void *user_data)
 {
     if (fd >= 0) {
         g_kms_fd = fd;
         safe_drm_set_master(fd);
+    }
+    struct dumb_bo_entry *sh = get_active_fbo_dumb();
+    if (sh && sh->cpu_map && sh->size > 0) {
+        pthread_mutex_lock(&g_dumb_mutex);
+        uint32_t target_h = (fb_id > 0 && fb_id < 256) ? g_fb_id_to_handle[fb_id] : 0;
+        struct dumb_bo_entry *flip_d = target_h ? find_dumb_bo_by_handle_locked(target_h) : NULL;
+        if (flip_d && flip_d->cpu_map && flip_d->size == sh->size) {
+            memcpy(flip_d->cpu_map, sh->cpu_map, (size_t)sh->size);
+        } else {
+            for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
+                if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].size == sh->size) {
+                    memcpy(g_dumb_table[i].cpu_map, sh->cpu_map, (size_t)sh->size);
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_dumb_mutex);
     }
     static int (*real_drmModePageFlip)(int, uint32_t, uint32_t, uint32_t, void *) = NULL;
     if (!real_drmModePageFlip) {
@@ -3759,6 +3848,9 @@ int drmModeAddFB(int fd, uint32_t width, uint32_t height, uint8_t depth,
     kmsg_log("[GPU-KMS] >>> drmModeAddFB: fd=%d, %ux%u, pitch=%u, bo_handle=%u (eff=%u)\n",
              fd, width, height, pitch, bo_handle, effective_handle);
     int ret = real_drmModeAddFB ? real_drmModeAddFB(fd, width, height, depth, bpp, pitch, effective_handle, buf_id) : -1;
+    if (ret == 0 && buf_id && *buf_id > 0 && *buf_id < 256) {
+        g_fb_id_to_handle[*buf_id] = bo_handle;
+    }
     kmsg_log("[GPU-KMS] <<< drmModeAddFB RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
     return ret;
 }
@@ -3806,6 +3898,9 @@ int drmModeAddFB2(int fd, uint32_t width, uint32_t height,
     kmsg_log("[GPU-KMS] >>> drmModeAddFB2: fd=%d, %ux%u, format=0x%x, h0=%u (eff=%u), pitch0=%u, flags=0x%x\n",
              fd, width, height, pixel_format, bo_handles ? bo_handles[0] : 0, eff_handles[0], pitches ? pitches[0] : 0, flags);
     int ret = real_drmModeAddFB2 ? real_drmModeAddFB2(fd, width, height, pixel_format, eff_handles, pitches, offsets, buf_id, flags) : -1;
+    if (ret == 0 && buf_id && *buf_id > 0 && *buf_id < 256 && bo_handles) {
+        g_fb_id_to_handle[*buf_id] = bo_handles[0];
+    }
     kmsg_log("[GPU-KMS] <<< drmModeAddFB2 RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
     return ret;
 }
