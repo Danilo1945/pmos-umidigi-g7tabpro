@@ -59,6 +59,19 @@ cat << 'EOF_MPV' > /etc/mpv/mpv.conf
 vo=wlshm
 ao=pipewire,alsa
 EOF_MPV
+cat << 'EOF_FF' > /usr/lib/firefox/firefox
+#!/bin/sh
+export HOME=/root
+export USER=root
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export WAYLAND_DISPLAY=wayland-0
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland
+export GSK_RENDERER=cairo
+export LIBGL_ALWAYS_SOFTWARE=1
+exec /usr/lib/firefox/firefox-real "$@"
+EOF_FF
+chmod 755 /usr/lib/firefox/firefox 2>/dev/null || true
 cat << 'EOF_GCC' > /usr/local/bin/gnome-control-center
 #!/bin/sh
 export XDG_CURRENT_DESKTOP=GNOME
