@@ -230,13 +230,14 @@ def lock_screen():
 def ensure_desired_orientation(force=False, async_exec=False):
     global current_sensor_orientation
     target_transform = "180" if current_sensor_orientation == "bottom-up" else ("90" if current_sensor_orientation == "left-up" else "normal")
+    wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
     try:
         if not force:
-            cmd_check = "WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr 2>/dev/null || true"
+            cmd_check = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} 2>/dev/null || true"
             out = subprocess.check_output(cmd_check, shell=True, stderr=subprocess.DEVNULL).decode().strip()
-            if f"Transform: {target_transform}" in out:
+            if "Enabled: yes" in out and f"Transform: {target_transform}" in out:
                 return
-        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root /usr/bin/wlr-randr --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
+        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
         if async_exec:
             subprocess.Popen(cmd, shell=True)
         else:
@@ -277,26 +278,30 @@ def sleep_tablet():
 
     print("[*] Tablet en reposo: pantalla bloqueada a 0 nits, táctil inhibido, CPU en powersave, GPU en 390 MHz.", flush=True)
 
+def _post_wake_verify():
+    for delay in (0.12, 0.25, 0.50):
+        time.sleep(delay)
+        if not is_screen_on:
+            return
+        ensure_desired_orientation(force=False, async_exec=False)
+
 def wake_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Despertando tablet: reactivando pantalla en Lockscreen y aceleración GPU/CPU...", flush=True)
+    print("[*] Despertando tablet: reactivando aceleración GPU/CPU, salida DSI-1 en 180° y Lockscreen...", flush=True)
     is_screen_on = True
 
-    # 1. Liberar bloqueo del panel táctil de inmediato
-    grab_touchscreen(grab=False)
-
-    # 2. Asegurar que el Lockscreen esté activo
-    lock_screen()
-
-    # 3. Restaurar brillo LCD seguro de inmediato para respuesta visual instantánea
-    target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
-    set_backlight_hardware(target_b)
-
-    # 4. Restaurar CPUs a performance y GPU Mali a 812 MHz
+    # 1. Restaurar CPUs a performance (2.2 GHz) y GPU Mali a 812 MHz ANTES de despertar Wayland (cero lag)
     set_cpu_and_gpu_power(performance=True)
 
-    # 5. Asegurar rotación en segundo plano sin bloquear
-    ensure_desired_orientation(force=True, async_exec=True)
+    # 2. Reactivar salida DSI-1 (--on) y forzar Transform: 180 síncronamente ANTES de liberar el touch
+    ensure_desired_orientation(force=True, async_exec=False)
+
+    # 3. Liberar bloqueo del panel táctil (ya sincronizado con DSI-1 en Transform: 180)
+    grab_touchscreen(grab=False)
+
+    # 4. Restaurar brillo LCD seguro de inmediato
+    target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
+    set_backlight_hardware(target_b)
 
     if login1_dbus_conn:
         try:
@@ -308,7 +313,10 @@ def wake_tablet():
         except Exception:
             pass
 
-    print(f"[*] Tablet activa en pantalla de bloqueo: brillo {target_b}, GPU Mali a 812 MHz.", flush=True)
+    # 5. Verificación post-wake en segundo plano por si Phosh reconfigura el monitor al despertar
+    threading.Thread(target=_post_wake_verify, daemon=True).start()
+
+    print(f"[*] Tablet activa en pantalla de bloqueo: brillo {target_b}, DSI-1 180°, GPU Mali a 812 MHz.", flush=True)
 
 def toggle_screen_power():
     global last_power_press_time, is_screen_on
@@ -398,6 +406,29 @@ def start_dbus_services():
     global login1_dbus_conn
     from gi.repository import Gio, GLib
 
+    hostname_policy = '''<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <policy user="root">
+    <allow own="org.freedesktop.hostname1"/>
+    <allow send_destination="org.freedesktop.hostname1"/>
+    <allow receive_sender="org.freedesktop.hostname1"/>
+  </policy>
+  <policy context="default">
+    <allow send_destination="org.freedesktop.hostname1"/>
+    <allow receive_sender="org.freedesktop.hostname1"/>
+  </policy>
+</busconfig>
+'''
+    for pdir in ["/etc/dbus-1/system.d", "/sysroot/etc/dbus-1/system.d"]:
+        try:
+            if os.path.isdir(pdir):
+                with open(os.path.join(pdir, "org.freedesktop.hostname1.conf"), "w") as f:
+                    f.write(hostname_policy)
+        except Exception:
+            pass
+    subprocess.call("killall -HUP dbus-daemon 2>/dev/null || true", shell=True)
+
     LOGIN1_XML = '''
     <node>
       <interface name="org.freedesktop.login1.Session">
@@ -424,6 +455,7 @@ def start_dbus_services():
         <method name="Suspend">
           <arg type="b" name="interactive" direction="in"/>
         </method>
+        <method name="Wake"/>
         <method name="PowerOff">
           <arg type="b" name="interactive" direction="in"/>
         </method>
@@ -463,6 +495,10 @@ def start_dbus_services():
         elif method == "Suspend":
             print("[*] DBus login1.Manager.Suspend llamado desde la GUI de Phosh!", flush=True)
             sleep_tablet()
+            invocation.return_value(None)
+        elif method == "Wake":
+            print("[*] DBus login1.Manager.Wake llamado!", flush=True)
+            wake_tablet()
             invocation.return_value(None)
         elif method == "PowerOff":
             print("[*] DBus login1.Manager.PowerOff llamado!", flush=True)
@@ -563,6 +599,42 @@ def start_dbus_services():
             None
         )
 
+    HOSTNAME_XML = '''
+    <node>
+      <interface name="org.freedesktop.hostname1">
+        <property name="Hostname" type="s" access="read"/>
+        <property name="StaticHostname" type="s" access="read"/>
+        <property name="PrettyHostname" type="s" access="read"/>
+        <property name="IconName" type="s" access="read"/>
+        <property name="Chassis" type="s" access="read"/>
+        <property name="OperatingSystemPrettyName" type="s" access="read"/>
+      </interface>
+    </node>
+    '''
+    hostname_node_info = Gio.DBusNodeInfo.new_for_xml(HOSTNAME_XML)
+
+    def handle_hostname_get_prop(conn, sender, path, iface, prop):
+        if prop in ('Hostname', 'StaticHostname'):
+            return GLib.Variant('s', 'umidigi-g7-tab-pro')
+        elif prop == 'PrettyHostname':
+            return GLib.Variant('s', 'UMIDIGI G7 Tab Pro')
+        elif prop == 'IconName':
+            return GLib.Variant('s', 'computer-tablet')
+        elif prop == 'Chassis':
+            return GLib.Variant('s', 'tablet')
+        elif prop == 'OperatingSystemPrettyName':
+            return GLib.Variant('s', 'postmarketOS v24.12 (GKI 5.10)')
+        return None
+
+    def on_hostname_bus_acquired(conn, name):
+        conn.register_object(
+            '/org/freedesktop/hostname1',
+            hostname_node_info.interfaces[0],
+            None,
+            handle_hostname_get_prop,
+            None
+        )
+
     try:
         Gio.bus_own_name(Gio.BusType.SYSTEM, 'org.freedesktop.login1', Gio.BusNameOwnerFlags.NONE, on_system_bus_acquired, None, None)
     except Exception as e:
@@ -572,6 +644,11 @@ def start_dbus_services():
         Gio.bus_own_name(Gio.BusType.SYSTEM, 'net.hadess.SensorProxy', Gio.BusNameOwnerFlags.NONE, on_sensor_bus_acquired, None, None)
     except Exception as e:
         print(f"[-] Error registrando net.hadess.SensorProxy: {e}", flush=True)
+
+    try:
+        Gio.bus_own_name(Gio.BusType.SYSTEM, 'org.freedesktop.hostname1', Gio.BusNameOwnerFlags.NONE, on_hostname_bus_acquired, None, None)
+    except Exception as e:
+        print(f"[-] Error registrando org.freedesktop.hostname1: {e}", flush=True)
 
     SESSION_XML = '''
     <node>
@@ -611,9 +688,9 @@ def start_dbus_services():
 
     def on_screensaver_signal(conn, sender, path, iface, signal, params):
         if signal == "ActiveChanged":
-            is_active = params.unpack()[0]
-            if not is_active:
+            if is_screen_on:
                 ensure_desired_orientation(force=False)
+                threading.Thread(target=_post_wake_verify, daemon=True).start()
 
     def ensure_session_bus_registered():
         addr = get_session_dbus_address()
@@ -692,6 +769,7 @@ def main():
                 cur_b = get_current_backlight()
                 if cur_b < MIN_SAFE_BRIGHTNESS or cur_b > MAX_SAFE_BRIGHTNESS:
                     set_backlight_hardware(saved_backlight_level)
+                ensure_desired_orientation(force=False)
 
         if not devs:
             time.sleep(1)
