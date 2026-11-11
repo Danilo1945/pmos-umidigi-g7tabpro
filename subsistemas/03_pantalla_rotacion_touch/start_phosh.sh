@@ -94,12 +94,11 @@ done
 chmod 755 /dev/snd /sysroot/dev/snd 2>/dev/null || true
 chmod 666 /dev/snd/* /sysroot/dev/snd/* 2>/dev/null || true
 
-# 3.4 Cargar periféricos adicionales (MicroSD mmc0, Linterna AW36515, Vibrador, SensorHub, BT/GPS/FM, AUXADC/CCCI)
-for pm in mt6577_auxadc mt6375-auxadc ccci_md_clk ccci_rtc \
+# 3.4 Cargar periféricos adicionales seguros (MicroSD mmc0, Linterna AW36515, Vibrador, BT/GPS/FM, AUXADC)
+for pm in mt6577_auxadc mt6375-auxadc \
           cqhci rpmb-mtk mtk-mmc-autok mtk-mmc-dbg mtk-mmc \
           regulator-vibrator mtk-pwm \
-          flashlight aw36515 tcs3724 \
-          hf_manager sensorhub \
+          flashlight aw36515 \
           bt_drv_connac1x gps_pwr gps_drv_stp fmradio_drv_mt6631_6635; do
     modprobe "$pm" 2>/dev/null || \
     insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$pm.ko" 2>/dev/null || \
@@ -116,12 +115,6 @@ if [ -n "$fm_maj" ]; then
     rm -f /dev/fm /sysroot/dev/fm 2>/dev/null || true
     mknod -m 666 /dev/fm c "$fm_maj" 0 2>/dev/null || true
     mknod -m 666 /sysroot/dev/fm c "$fm_maj" 0 2>/dev/null || true
-fi
-hf_maj=$(awk '$2=="hf_manager" {print $1}' /proc/devices 2>/dev/null)
-if [ -n "$hf_maj" ]; then
-    rm -f /dev/hf_manager /sysroot/dev/hf_manager 2>/dev/null || true
-    mknod -m 666 /dev/hf_manager c "$hf_maj" 0 2>/dev/null || true
-    mknod -m 666 /sysroot/dev/hf_manager c "$hf_maj" 0 2>/dev/null || true
 fi
 chmod 666 /sys/class/flashlight_core/flashlight/flashlight_torch /sys/class/leds/vibrator/brightness 2>/dev/null || true
 
@@ -241,7 +234,15 @@ while [ $count -lt 80 ]; do
 done
 sleep 0.5
 
-# 3. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
+# 3. Propagar entorno completo a D-Bus de sesión para activación de servicios y GNOME Settings
+dbus-update-activation-environment --all 2>/dev/null || true
+
+# 4. Iniciar demonio de RFKILL para control y conmutación de Bluetooth y modo avión
+if ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
+    /usr/libexec/gsd-rfkill >/var/log/gsd-rfkill.log 2>&1 &
+fi
+
+# 5. Configuraciones de energia seguras para GNOME y animaciones fluidas a 60 FPS
 gsettings set org.gnome.settings-daemon.plugins.power active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
@@ -249,7 +250,7 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+# 6. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi
@@ -343,14 +344,14 @@ if [ -f /usr/bin/tablet_bt_daemon.py ] && ! pgrep -f tablet_bt_daemon.py >/dev/n
 fi
 
 # 11. Subsistema 02: Batería, Cargador Sub-PMIC MT6375, Telemetría ADC/OCV y Proveedor UPower
-for bm in mt635x_auxadc charger_class mt6375-charger mt6358_battery; do
+for bm in mt635x_auxadc mt6375-auxadc charger_class mt6375-charger mt6358_battery; do
     modprobe "$bm" 2>/dev/null || insmod "/lib/modules/5.10.185-android12-9-gcc7d44e69095-dirty/$bm.ko" 2>/dev/null || true
 done
+pkill -9 -f tablet_battery_daemon.py 2>/dev/null || true
+killall -9 battery_daemon 2>/dev/null || true
 if [ -f /usr/bin/upower_battery_provider.py ] && ! pgrep -f upower_battery_provider.py >/dev/null 2>&1; then
     killall -9 upowerd 2>/dev/null || true
     python3 -u /usr/bin/upower_battery_provider.py > /var/log/upower_provider.log 2>&1 &
-elif [ -f /usr/bin/tablet_battery_daemon.py ] && ! pgrep -f tablet_battery_daemon.py >/dev/null 2>&1; then
-    python3 -u /usr/bin/tablet_battery_daemon.py > /var/log/battery_daemon.log 2>&1 &
 fi
 
 # 12. Subsistema 01: Audio (PipeWire + WirePlumber + 4x Amplificadores AW87359)

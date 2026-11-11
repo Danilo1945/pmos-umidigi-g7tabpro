@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# Proveedor Maestro UPower D-Bus y Gestor de Carga Rápida (MT6375 + MT6366)
+# UMIDIGI G7 Tab Pro (TG2403GBA / MediaTek Helio G99 MT6789 - Celda 7500 mAh)
+# ==============================================================================
 import dbus, dbus.service, dbus.mainloop.glib, glob, sys, time, os, subprocess, signal
 from gi.repository import GLib
 
@@ -11,29 +15,40 @@ PROPS_IFACE = 'org.freedesktop.DBus.Properties'
 INTRO_IFACE = 'org.freedesktop.DBus.Introspectable'
 
 CHG_DIR = '/sys/class/power_supply/11017000.i2c:mt6375@34:chg'
-IIO_MT6375 = '/sys/bus/iio/devices/iio:device0'
-IIO_AUXADC = '/sys/bus/iio/devices/iio:device1'
+PATH_INIT = '/sys/class/power_supply/battery/init_done'
+PATH_UI_SOC = '/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/UI_SOC'
+PATH_FG_CURRENT = '/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt6358-gauge/FG_Battery_CurrentConsumption'
 
-OCV_TABLE = [
-    (4350, 100), (4200, 95), (4100, 88), (4000, 78), (3900, 65),
-    (3800, 48), (3700, 28), (3600, 12), (3500, 5), (3400, 1)
+SOUND_PLUG = '/usr/share/sounds/oxygen/stereo/power-plug.ogg'
+SOUND_UNPLUG = '/usr/share/sounds/oxygen/stereo/power-unplug.ogg'
+
+# Tabla OCV oficial de 100 puntos (mV * 10, SoC %) para la celda Li-Po de 7500 mAh
+OCV_TABLE_MV10 = [
+    (43712, 100), (43586, 99), (43473, 98), (43362, 97), (43254, 96),
+    (43140, 95),  (43029, 94), (42912, 93), (42798, 92), (42682, 91),
+    (42567, 90),  (42450, 89), (42337, 88), (42222, 87), (42106, 86),
+    (41991, 85),  (41876, 84), (41765, 83), (41650, 82), (41536, 81),
+    (41425, 80),  (41317, 79), (41212, 78), (41108, 77), (41006, 76),
+    (40908, 75),  (40810, 74), (40713, 73), (40616, 72), (40520, 71),
+    (40422, 70),  (40324, 69), (40224, 68), (40124, 67), (40023, 66),
+    (39922, 65),  (39820, 64), (39719, 63), (39618, 62), (39517, 61),
+    (39417, 60),  (39317, 59), (39218, 58), (39119, 57), (39020, 56),
+    (38923, 55),  (38827, 54), (38732, 53), (38637, 52), (38544, 51),
+    (38452, 50),  (38361, 49), (38271, 48), (38183, 47), (38096, 46),
+    (38010, 45),  (37926, 44), (37843, 43), (37762, 42), (37682, 41),
+    (37604, 40),  (37527, 39), (37452, 38), (37378, 37), (37306, 36),
+    (37236, 35),  (37167, 34), (37100, 33), (37035, 32), (36972, 31),
+    (36911, 30),  (36852, 29), (36795, 28), (36739, 27), (36686, 26),
+    (36635, 25),  (36585, 24), (36537, 23), (36490, 22), (36444, 21),
+    (36399, 20),  (36354, 19), (36308, 18), (36260, 17), (36209, 16),
+    (36153, 15),  (36090, 14), (36017, 13), (35930, 12), (35824, 11),
+    (35692, 10),  (35522, 9),  (35300, 8),  (35002, 7),  (34586, 6),
+    (33990, 5),   (33100, 4),  (32000, 3),  (31000, 2),  (30000, 1)
 ]
 
 _smoothed_soc = None
 _tick_counter = 0
-
-def calc_soc(v_mv):
-    if v_mv >= OCV_TABLE[0][0]:
-        return 100
-    if v_mv <= OCV_TABLE[-1][0]:
-        return 1
-    for i in range(len(OCV_TABLE) - 1):
-        v_high, s_high = OCV_TABLE[i]
-        v_low, s_low = OCV_TABLE[i+1]
-        if v_mv <= v_high and v_mv >= v_low:
-            frac = (v_mv - v_low) / float(v_high - v_low)
-            return int(s_low + frac * (s_high - s_low) + 0.5)
-    return 50
+_last_charging = None
 
 def read_val(path):
     try:
@@ -50,11 +65,54 @@ def write_val(path, val):
     except Exception:
         return False
 
+def find_iio_mt6375():
+    # 1. Ruta física directa en I2C-5 del Sub-PMIC MT6375
+    matches = glob.glob('/sys/devices/platform/soc/11017000.i2c/i2c-5/5-0034/11017000.i2c:mt6375@34:adc/iio:device*')
+    if matches:
+        return matches[0]
+    # 2. Búsqueda por atributo name o canales específicos de MT6375
+    for d in sorted(glob.glob('/sys/bus/iio/devices/iio:device*')):
+        name = (read_val(f'{d}/name') or '').lower()
+        if 'mt6375' in name or os.path.exists(f'{d}/in_current6_raw'):
+            return d
+    return '/sys/bus/iio/devices/iio:device0'
+
+def find_iio_auxadc():
+    # 1. Ruta física directa en PWRAP del PMIC principal MT6366 (mt635x-auxadc)
+    matches = glob.glob('/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device*')
+    if matches:
+        return matches[0]
+    # 2. Búsqueda por presencia del canal BATADC
+    for d in sorted(glob.glob('/sys/bus/iio/devices/iio:device*')):
+        if os.path.exists(f'{d}/in_voltage0_BATADC_input'):
+            return d
+    return '/sys/bus/iio/devices/iio:device1'
+
+def calc_soc_mv(v_mv):
+    vocv_mv10 = int(round(v_mv * 10.0))
+    if vocv_mv10 >= OCV_TABLE_MV10[0][0]:
+        return 100.0
+    if vocv_mv10 <= OCV_TABLE_MV10[-1][0]:
+        return 1.0
+    for i in range(len(OCV_TABLE_MV10) - 1):
+        v_high, s_high = OCV_TABLE_MV10[i]
+        v_low, s_low = OCV_TABLE_MV10[i + 1]
+        if v_low <= vocv_mv10 <= v_high:
+            frac = (vocv_mv10 - v_low) / float(v_high - v_low) if v_high != v_low else 0.0
+            return s_low + frac * (s_high - s_low)
+    return 50.0
+
+def play_plug_sound(charging):
+    snd = SOUND_PLUG if charging else SOUND_UNPLUG
+    if os.path.exists(snd):
+        cmd = f"XDG_RUNTIME_DIR=/tmp/runtime-root pw-play {snd} >/dev/null 2>&1 &"
+        subprocess.Popen(cmd, shell=True)
+
 def ensure_charger_modules():
     if os.path.exists(CHG_DIR):
         return
     krel = '5.10.185-android12-9-gcc7d44e69095-dirty'
-    for mod in ['mt635x_auxadc', 'charger_class', 'mt6375-charger']:
+    for mod in ['mt635x_auxadc', 'mt6375-auxadc', 'charger_class', 'mt6375-charger', 'mt6358_battery']:
         subprocess.call(['modprobe', mod], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for prefix in ['', '/sysroot']:
             ko_path = f'{prefix}/lib/modules/{krel}/{mod}.ko'
@@ -62,31 +120,48 @@ def ensure_charger_modules():
                 subprocess.call(['insmod', ko_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def read_vbus_mv():
+    iio_mt6375 = find_iio_mt6375()
+    iio_auxadc = find_iio_auxadc()
     # 1. Leer VBUS desde ADC del Sub-PMIC MT6375 (escala = 6.25 mV)
-    raw = read_val(f'{IIO_MT6375}/in_voltage1_raw')
+    raw = read_val(f'{iio_mt6375}/in_voltage1_raw')
     if raw and raw.lstrip('-').isdigit():
-        return int(int(raw) * 6.25)
+        val = int(int(raw) * 6.25)
+        if val > 1000:
+            return val
     # 2. Alternativa: mtk-master-charger voltage_now (mV)
     v_mst = read_val('/sys/class/power_supply/mtk-master-charger/voltage_now')
     if v_mst and v_mst.lstrip('-').isdigit():
-        return int(v_mst)
+        val = int(v_mst)
+        if val > 1000:
+            return val // 1000 if val > 100000 else val
     # 3. Alternativa: divisor VCDT en AUXADC (538 mV ~ 5.0V VBUS)
-    vcdt = read_val(f'{IIO_AUXADC}/in_voltage2_VCDT_input')
+    vcdt = read_val(f'{iio_auxadc}/in_voltage2_VCDT_input')
     if vcdt and vcdt.lstrip('-').isdigit():
         return int(int(vcdt) * 9.4)
     return 0
 
-def read_ibat_ma():
-    # Corriente de carga entrante medida por el ADC del MT6375 (escala = 2.5 mA)
-    raw = read_val(f'{IIO_MT6375}/in_current6_raw')
-    if raw and raw.lstrip('-').isdigit():
-        return int(int(raw) * 2.5)
-    return 0
+def read_ibat_ma(charging):
+    iio_mt6375 = find_iio_mt6375()
+    # 1. Corriente de carga entrante medida por el ADC del MT6375 (escala = 2.5 mA)
+    if charging:
+        raw = read_val(f'{iio_mt6375}/in_current6_raw')
+        if raw and raw.lstrip('-').isdigit():
+            val = int(int(raw) * 2.5)
+            if val > 0:
+                return val
+    # 2. Lectura del Fuel Gauge MT6358/MT6366 (en uA)
+    fg_raw = read_val(PATH_FG_CURRENT)
+    if fg_raw and fg_raw.lstrip('-').isdigit():
+        fg_ma = abs(int(fg_raw)) // 1000
+        if 10 <= fg_ma <= 4000:
+            return fg_ma
+    return 0 if charging else 450
 
 def manage_hardware_charging():
-    global _tick_counter
+    global _tick_counter, _last_charging
     _tick_counter += 1
     ensure_charger_modules()
+    write_val(PATH_INIT, 1)
 
     vbus_mv = read_vbus_mv()
     usb_present = (vbus_mv >= 4100)
@@ -98,69 +173,87 @@ def manage_hardware_charging():
         if usb_present:
             need_kick = (
                 online_str != '1' or
-                'charging' not in status_str or
+                ('charging' not in status_str and 'full' not in status_str) or
                 'not' in status_str or
                 (_tick_counter % 10 == 1)
             )
             if need_kick:
                 write_val(f'{CHG_DIR}/online', 1)
                 write_val(f'{CHG_DIR}/constant_charge_voltage', 4350)
-                write_val(f'{CHG_DIR}/input_current_limit', 1500)
-                write_val(f'{CHG_DIR}/constant_charge_current', 1500)
+                write_val(f'{CHG_DIR}/input_current_limit', 2000)
+                write_val(f'{CHG_DIR}/constant_charge_current', 2000)
                 write_val(f'{CHG_DIR}/status', 1)
-            return True
+            charging = True
         else:
             if online_str != '0' or ('charging' in status_str and 'not' not in status_str):
                 write_val(f'{CHG_DIR}/status', 0)
                 write_val(f'{CHG_DIR}/online', 0)
-            return False
+            charging = False
+    else:
+        charging = usb_present
 
-    return usb_present
+    if _last_charging is not None and charging != _last_charging:
+        play_plug_sound(charging)
+    _last_charging = charging
+    return charging
 
-def compute_telemetry(charging):
-    global _smoothed_soc
-    v_mv = None
+def read_vbat_mv():
+    iio_auxadc = find_iio_auxadc()
+    iio_mt6375 = find_iio_mt6375()
 
     # 1. Leer canal ADC real de la celda (BATADC en MT6366)
     for adc_path in [
-        f'{IIO_AUXADC}/in_voltage0_BATADC_input',
-        '/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device1/in_voltage0_BATADC_input'
+        f'{iio_auxadc}/in_voltage0_BATADC_input',
+        '/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device1/in_voltage0_BATADC_input',
+        '/sys/devices/platform/soc/10026000.pwrap/10026000.pwrap:mt6366/mt635x-auxadc/iio:device0/in_voltage0_BATADC_input',
+        '/sys/class/power_supply/battery/voltage_now',
     ]:
         v = read_val(adc_path)
-        if v and v.isdigit():
+        if v and v.lstrip('-').isdigit():
             val = int(v)
             cand = val // 1000 if val > 100000 else val
-            if 3000 <= cand <= 4550:
-                v_mv = cand
-                break
+            if 2850 <= cand <= 4550:
+                return cand
 
     # 2. Alternativa desde el ADC VBAT del MT6375 (escala = 1.25 mV)
+    raw_vbat = read_val(f'{iio_mt6375}/in_voltage4_raw')
+    if raw_vbat and raw_vbat.lstrip('-').isdigit():
+        cand = int(int(raw_vbat) * 1.25)
+        if 2850 <= cand <= 4550:
+            return cand
+
+    return None
+
+def compute_telemetry(charging):
+    global _smoothed_soc
+    v_mv = read_vbat_mv()
     if v_mv is None:
-        raw_vbat = read_val(f'{IIO_MT6375}/in_voltage4_raw')
-        if raw_vbat and raw_vbat.isdigit():
-            cand = int(int(raw_vbat) * 1.25)
-            if 3000 <= cand <= 4550:
-                v_mv = cand
+        v_mv = 3850
 
-    if v_mv is None:
-        v_mv = 4000
+    ibat_ma = read_ibat_ma(charging)
+    chg_status = (read_val(f'{CHG_DIR}/status') or '').lower() if os.path.exists(CHG_DIR) else ''
+    is_full_hw = charging and ('full' in chg_status or (v_mv >= 4310 and ibat_ma < 180))
 
-    ibat_ma = read_ibat_ma() if charging else 0
-
-    # Compensación IR durante la carga (R_eff ~ 175 mOhm entre conector, trazas y celda)
-    if charging and ibat_ma > 20:
-        v_ocv = max(3400, v_mv - int(ibat_ma * 0.175))
+    # Compensación bidireccional de resistencia interna (R_cell ~ 85 mOhm, R_chg_path ~ 120 mOhm)
+    if is_full_hw:
+        v_ocv = max(float(v_mv), 4371.2)
+    elif charging and ibat_ma > 20:
+        v_ocv = max(3000.0, float(v_mv) - (ibat_ma * 0.120))
+    elif not charging:
+        load_ma = min(1500, max(250, ibat_ma))
+        v_ocv = min(4371.2, float(v_mv) + (load_ma * 0.085))
     else:
-        v_ocv = v_mv
+        v_ocv = float(v_mv)
 
-    raw_soc = calc_soc(v_ocv)
+    raw_soc = calc_soc_mv(v_ocv)
     if _smoothed_soc is None:
         _smoothed_soc = float(raw_soc)
     else:
         _smoothed_soc = 0.25 * float(raw_soc) + 0.75 * _smoothed_soc
 
     soc = max(1, min(100, int(_smoothed_soc + 0.5)))
-    return soc, v_mv / 1000.0, ibat_ma
+    write_val(PATH_UI_SOC, soc)
+    return soc, v_mv / 1000.0, ibat_ma, is_full_hw
 
 class BatteryDevice(dbus.service.Object):
     def __init__(self, bus, path):
@@ -171,11 +264,11 @@ class BatteryDevice(dbus.service.Object):
 
     def _refresh(self):
         charging = manage_hardware_charging()
-        soc, volts, ibat_ma = compute_telemetry(charging)
+        soc, volts, ibat_ma, is_full_hw = compute_telemetry(charging)
 
         # Estado UPower: 1=Charging, 2=Discharging, 4=Fully charged
         if charging:
-            state = 4 if (soc >= 99 and ibat_ma < 150) else 1
+            state = 4 if (is_full_hw or (soc >= 99 and ibat_ma < 180)) else 1
             icon_suffix = '-charging-symbolic' if state == 1 else '-charged-symbolic'
         else:
             state = 2
@@ -196,7 +289,26 @@ class BatteryDevice(dbus.service.Object):
         now = int(time.time())
         energy_full = 28.5  # 7500 mAh * 3.8V = 28.5 Wh
         energy_now = round((soc / 100.0) * energy_full, 2)
-        energy_rate = round((ibat_ma * volts) / 1000.0, 2) if charging else 2.5
+        if charging:
+            eff_ma = max(100, ibat_ma) if state == 1 else 0
+            energy_rate = round((eff_ma * volts) / 1000.0, 2)
+        else:
+            eff_ma = max(250, ibat_ma)
+            energy_rate = round((eff_ma * volts) / 1000.0, 2)
+
+        time_to_empty = 0
+        time_to_full = 0
+        if state == 2 and energy_rate > 0.1:
+            time_to_empty = int((energy_now / energy_rate) * 3600)
+        elif state == 1 and energy_rate > 0.1:
+            time_to_full = int(((energy_full - energy_now) / energy_rate) * 3600)
+
+        if soc <= 5 and not charging:
+            warn_level = 4  # Critical
+        elif soc <= 12 and not charging:
+            warn_level = 3  # Low
+        else:
+            warn_level = 1  # None
 
         self._p = {
             'NativePath': dbus.String('mt6375-charger'),
@@ -212,7 +324,7 @@ class BatteryDevice(dbus.service.Object):
             'Online': dbus.Boolean(charging),
             'State': dbus.UInt32(state),
             'Technology': dbus.UInt32(2),           # Lithium-polymer
-            'WarningLevel': dbus.UInt32(1),         # UP_DEVICE_LEVEL_NONE = 1
+            'WarningLevel': dbus.UInt32(warn_level),
             'BatteryLevel': dbus.UInt32(1),         # UP_DEVICE_LEVEL_NONE = 1 (usa Percentage continuo)
             'Percentage': dbus.Double(float(soc)),
             'Energy': dbus.Double(energy_now),
@@ -221,8 +333,8 @@ class BatteryDevice(dbus.service.Object):
             'EnergyFullDesign': dbus.Double(energy_full),
             'EnergyRate': dbus.Double(energy_rate),
             'Voltage': dbus.Double(round(volts, 3)),
-            'TimeToEmpty': dbus.Int64(0),
-            'TimeToFull': dbus.Int64(0),
+            'TimeToEmpty': dbus.Int64(time_to_empty),
+            'TimeToFull': dbus.Int64(time_to_full),
             'IconName': dbus.String(icon_name),
             'UpdateTime': dbus.UInt64(now),
         }
@@ -337,6 +449,10 @@ class UpowerDaemon(dbus.service.Object):
         return '<node name=/></node>'
 
 def main():
+    # Asegurar que no haya demonios conflictivos intentando relanzar upowerd
+    subprocess.call(['pkill', '-9', '-f', 'tablet_battery_daemon.py'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.call(['killall', '-9', 'battery_daemon', 'upowerd'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     ensure_charger_modules()
     manage_hardware_charging()
 
@@ -355,6 +471,7 @@ def main():
         sys.exit(2)
 
     paths = [
+        '/org/freedesktop/UPower/devices/battery_battery',
         '/org/freedesktop/UPower/devices/battery_fake0',
         '/org/freedesktop/UPower/devices/DisplayDevice',
     ]
@@ -371,10 +488,13 @@ def main():
                     {
                         'Percentage': d._p['Percentage'],
                         'State': d._p['State'],
+                        'WarningLevel': d._p['WarningLevel'],
                         'IconName': d._p['IconName'],
                         'Voltage': d._p['Voltage'],
                         'Energy': d._p['Energy'],
                         'EnergyRate': d._p['EnergyRate'],
+                        'TimeToEmpty': d._p['TimeToEmpty'],
+                        'TimeToFull': d._p['TimeToFull'],
                         'Online': d._p['Online'],
                         'UpdateTime': d._p['UpdateTime'],
                     },
