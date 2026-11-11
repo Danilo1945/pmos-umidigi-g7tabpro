@@ -285,7 +285,13 @@ dbus-update-activation-environment --all 2>/dev/null || true
 dbus-update-activation-environment --systemd GSK_RENDERER=cairo QTWEBENGINE_DISABLE_SANDBOX=1 GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root XDG_CURRENT_DESKTOP=GNOME:Phosh XDG_SESSION_DESKTOP=phosh NO_AT_BRIDGE=1 2>/dev/null || true
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.UpdateActivationEnvironment "{'GSK_RENDERER': 'cairo', 'QTWEBENGINE_DISABLE_SANDBOX': '1', 'GDK_BACKEND': 'wayland', 'WAYLAND_DISPLAY': 'wayland-0', 'XDG_RUNTIME_DIR': '/tmp/runtime-root', 'XDG_CURRENT_DESKTOP': 'GNOME:Phosh', 'XDG_SESSION_DESKTOP': 'phosh', 'NO_AT_BRIDGE': '1'}" >/dev/null 2>&1 || true
 
-# 4. Iniciar demonio de RFKILL para control y conmutación de Bluetooth y modo avión
+# 4. Iniciar demonio de RFKILL y sincronización automática de zona horaria y hora NTP
+cp -f /usr/share/zoneinfo/America/Guayaquil /etc/localtime 2>/dev/null || true
+echo "America/Guayaquil" > /etc/timezone 2>/dev/null || true
+grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null || printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" >> /etc/resolv.conf 2>/dev/null || true
+if ! pgrep -x ntpd >/dev/null 2>&1; then
+    ntpd -p 216.239.35.0 -p 216.239.35.4 -p pool.ntp.org 2>/dev/null || true
+fi
 if ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
     /usr/libexec/gsd-rfkill >/var/log/gsd-rfkill.log 2>&1 &
 fi
