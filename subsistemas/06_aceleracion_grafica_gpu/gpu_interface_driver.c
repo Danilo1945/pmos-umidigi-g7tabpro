@@ -1909,6 +1909,7 @@ struct shadow_tex {
     GLenum format;
     uint32_t *pixels; /* Siempre almacenado como ARGB8888 (0xAARRGGBB en little-endian = BGRA bytes) */
     int has_alpha;
+    struct dumb_bo_entry *dmabuf;
 };
 
 struct egl_img_map_entry {
@@ -1981,22 +1982,18 @@ static struct dumb_bo_entry *find_egl_image_dumb(void *img) {
 }
 
 static struct dumb_bo_entry *get_active_fbo_dumb(void) {
-    /* Usar una superficie shadow offscreen en RAM cacheada para componer el cuadro completo
-     * sin tocar ningún buffer KMS de scanout mientras el controlador DSI está escaneando.
-     * En drmModePageFlip volcaremos atómicamente este buffer completo al buffer KMS destino. */
-    static struct dumb_bo_entry s_shadow_scanout = {0};
-    if (!s_shadow_scanout.cpu_map) {
-        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-            if (g_dumb_table[i].bo && g_dumb_table[i].width == 1200 && g_dumb_table[i].height == 1920) {
-                s_shadow_scanout = g_dumb_table[i];
-                s_shadow_scanout.cpu_map = calloc(1, (size_t)s_shadow_scanout.size);
-                break;
-            }
+    if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS) {
+        GLuint rbo = g_fbo_rbo[g_bound_fbo];
+        if (rbo > 0 && rbo < MAX_SHADOW_RBOS && g_rbo_dumb[rbo]) {
+            return g_rbo_dumb[rbo];
+        }
+        /* En wlroots gles2, cada FBO de scanout (1, 2, 3...) corresponde secuencialmente a los dumb_bo de scanout (0, 1, 2...) */
+        int idx = (int)g_bound_fbo - 1;
+        if (idx >= 0 && idx < MAX_DUMB_ENTRIES && g_dumb_table[idx].bo && g_dumb_table[idx].cpu_map) {
+            return &g_dumb_table[idx];
         }
     }
-    if (s_shadow_scanout.cpu_map) {
-        return &s_shadow_scanout;
-    }
+    /* Fallback: devolver el primer dumb_bo con cpu_map válido */
     for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
         if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map) {
             return &g_dumb_table[i];
@@ -2038,6 +2035,7 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
                 }
                 g_shadow_tex[t].width = 0;
                 g_shadow_tex[t].height = 0;
+                g_shadow_tex[t].dmabuf = NULL;
             }
         }
     }
@@ -2121,6 +2119,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
             st->width = width;
             st->height = height;
         }
+        st->dmabuf = NULL;
         st->format = format;
         if (pixels && st->pixels) {
             convert_and_store_tex_region(st, 0, 0, width, height, format, pixels,
@@ -2243,8 +2242,8 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
                 st->width = (int)d->width;
                 st->height = (int)d->height;
             }
+            st->dmabuf = d;
             if (st->pixels) {
-                /* DRM_FORMAT_ABGR8888 (0x34324241) o DRM_FORMAT_XBGR8888 (0x34324258) corresponden a GL_RGBA (0x1908) en little-endian */
                 GLenum gl_fmt = (d->format == 0x34324241 || d->format == 0x34324258) ? 0x1908 /* GL_RGBA */ : 0x80E1 /* GL_BGRA_EXT */;
                 convert_and_store_tex_region(st, 0, 0, (int)d->width, (int)d->height,
                                              gl_fmt, d->cpu_map, (int)(d->stride / 4), 0, 0);
@@ -2878,7 +2877,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     for (int i = 0; i < 4; i++) {
         float ndc_x = vx[i] * sp->proj[0] + vy[i] * sp->proj[1] + sp->proj[2];
         float ndc_y = vx[i] * sp->proj[3] + vy[i] * sp->proj[4] + sp->proj[5];
-        sx[i] = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
+        sx[i] = (float)g_vp_x + (1.0f - ndc_x) * 0.5f * (float)g_vp_w;
         sy[i] = (float)g_vp_y + (1.0f - ndc_y) * 0.5f * (float)g_vp_h;
         u[i]  = vx[i] * sp->tex_proj[0] + vy[i] * sp->tex_proj[1] + sp->tex_proj[2];
         v[i]  = vx[i] * sp->tex_proj[3] + vy[i] * sp->tex_proj[4] + sp->tex_proj[5];
@@ -2893,11 +2892,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int y0 = (int)(min_sy + 0.5f);
     int y1 = (int)(max_sy + 0.5f);
 
-    /* Aplicar recorte de Scissor y límites del Framebuffer (mapeando origen inferior OpenGL a origen superior Framebuffer) */
+    /* Aplicar recorte de Scissor y límites del Framebuffer (invirtiendo X e Y de 180° a coordenadas lógicas) */
     int clip_x0 = 0, clip_y0 = 0, clip_x1 = fb_w, clip_y1 = fb_h;
     if (g_scissor_enabled) {
-        int sc_x0 = g_sc_x;
-        int sc_x1 = g_sc_x + g_sc_w;
+        int sc_x0 = fb_w - (g_sc_x + g_sc_w);
+        int sc_x1 = fb_w - g_sc_x;
         int sc_y0 = fb_h - (g_sc_y + g_sc_h);
         int sc_y1 = fb_h - g_sc_y;
         if (sc_x0 > clip_x0) clip_x0 = sc_x0;
@@ -2933,7 +2932,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                 }
                 float ndc_x = rvx * sp->proj[0] + rvy * sp->proj[1] + sp->proj[2];
                 float ndc_y = rvx * sp->proj[3] + rvy * sp->proj[4] + sp->proj[5];
-                float rsx = (float)g_vp_x + (ndc_x + 1.0f) * 0.5f * (float)g_vp_w;
+                float rsx = (float)g_vp_x + (1.0f - ndc_x) * 0.5f * (float)g_vp_w;
                 float rsy = (float)g_vp_y + (1.0f - ndc_y) * 0.5f * (float)g_vp_h;
                 if (rsx < r_min_x) r_min_x = rsx;
                 if (rsx > r_max_x) r_max_x = rsx;
@@ -2996,6 +2995,16 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (g_bound_tex == 0 || g_bound_tex >= MAX_SHADOW_TEXTURES) continue;
         struct shadow_tex *st = &g_shadow_tex[g_bound_tex];
         if (!st->pixels || st->width <= 0 || st->height <= 0) continue;
+
+        /* Si la textura proviene de un DMA-BUF de cliente que se reutiliza en vivo, sincronizar la región antes de dibujar */
+        if (st->dmabuf && st->dmabuf->cpu_map &&
+            (int)st->dmabuf->width == st->width && (int)st->dmabuf->height == st->height) {
+            GLenum gl_fmt = (st->dmabuf->format == 0x34324241 || st->dmabuf->format == 0x34324258) ? 0x1908 /* GL_RGBA */ : 0x80E1 /* GL_BGRA_EXT */;
+            if (r == 0) {
+                convert_and_store_tex_region(st, 0, 0, st->width, st->height,
+                                             gl_fmt, st->dmabuf->cpu_map, (int)(st->dmabuf->stride / 4), 0, 0);
+            }
+        }
 
         float quad_w = (max_sx - min_sx);
         float quad_h = (max_sy - min_sy);
@@ -3131,8 +3140,8 @@ void glClear(unsigned int mask) {
         uint32_t col = pack_argb(g_clear_color[0], g_clear_color[1], g_clear_color[2], 1.0f);
         int cx0 = 0, cy0 = 0, cx1 = (int)d->width, cy1 = (int)d->height;
         if (g_scissor_enabled) {
-            int sc_x0 = g_sc_x;
-            int sc_x1 = g_sc_x + g_sc_w;
+            int sc_x0 = (int)d->width - (g_sc_x + g_sc_w);
+            int sc_x1 = (int)d->width - g_sc_x;
             int sc_y0 = (int)d->height - (g_sc_y + g_sc_h);
             int sc_y1 = (int)d->height - g_sc_y;
             if (sc_x0 > cx0) cx0 = sc_x0;
@@ -3752,16 +3761,6 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
         kmsg_log("[GPU-KMS] drmModeSetCrtc: safe_drm_set_master(fd=%d) -> ret=%d (errno=%d)\n",
                  fd, mret, mret < 0 ? errno : 0);
     }
-    struct dumb_bo_entry *sh = get_active_fbo_dumb();
-    if (sh && sh->cpu_map && sh->size > 0) {
-        pthread_mutex_lock(&g_dumb_mutex);
-        for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-            if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].size == sh->size) {
-                memcpy(g_dumb_table[i].cpu_map, sh->cpu_map, (size_t)sh->size);
-            }
-        }
-        pthread_mutex_unlock(&g_dumb_mutex);
-    }
     static int (*real_drmModeSetCrtc)(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *, int, drmModeModeInfoPtr) = NULL;
     if (!real_drmModeSetCrtc) {
         real_drmModeSetCrtc = dlsym(RTLD_NEXT, "drmModeSetCrtc");
@@ -3777,30 +3776,12 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
     return ret;
 }
 
-static uint32_t g_fb_id_to_handle[256] = {0};
-
 int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
                     uint32_t flags, void *user_data)
 {
     if (fd >= 0) {
         g_kms_fd = fd;
         safe_drm_set_master(fd);
-    }
-    struct dumb_bo_entry *sh = get_active_fbo_dumb();
-    if (sh && sh->cpu_map && sh->size > 0) {
-        pthread_mutex_lock(&g_dumb_mutex);
-        uint32_t target_h = (fb_id > 0 && fb_id < 256) ? g_fb_id_to_handle[fb_id] : 0;
-        struct dumb_bo_entry *flip_d = target_h ? find_dumb_bo_by_handle_locked(target_h) : NULL;
-        if (flip_d && flip_d->cpu_map && flip_d->size == sh->size) {
-            memcpy(flip_d->cpu_map, sh->cpu_map, (size_t)sh->size);
-        } else {
-            for (int i = 0; i < MAX_DUMB_ENTRIES; i++) {
-                if (g_dumb_table[i].bo && g_dumb_table[i].cpu_map && g_dumb_table[i].size == sh->size) {
-                    memcpy(g_dumb_table[i].cpu_map, sh->cpu_map, (size_t)sh->size);
-                }
-            }
-        }
-        pthread_mutex_unlock(&g_dumb_mutex);
     }
     static int (*real_drmModePageFlip)(int, uint32_t, uint32_t, uint32_t, void *) = NULL;
     if (!real_drmModePageFlip) {
@@ -3848,9 +3829,6 @@ int drmModeAddFB(int fd, uint32_t width, uint32_t height, uint8_t depth,
     kmsg_log("[GPU-KMS] >>> drmModeAddFB: fd=%d, %ux%u, pitch=%u, bo_handle=%u (eff=%u)\n",
              fd, width, height, pitch, bo_handle, effective_handle);
     int ret = real_drmModeAddFB ? real_drmModeAddFB(fd, width, height, depth, bpp, pitch, effective_handle, buf_id) : -1;
-    if (ret == 0 && buf_id && *buf_id > 0 && *buf_id < 256) {
-        g_fb_id_to_handle[*buf_id] = bo_handle;
-    }
     kmsg_log("[GPU-KMS] <<< drmModeAddFB RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
     return ret;
 }
@@ -3898,9 +3876,6 @@ int drmModeAddFB2(int fd, uint32_t width, uint32_t height,
     kmsg_log("[GPU-KMS] >>> drmModeAddFB2: fd=%d, %ux%u, format=0x%x, h0=%u (eff=%u), pitch0=%u, flags=0x%x\n",
              fd, width, height, pixel_format, bo_handles ? bo_handles[0] : 0, eff_handles[0], pitches ? pitches[0] : 0, flags);
     int ret = real_drmModeAddFB2 ? real_drmModeAddFB2(fd, width, height, pixel_format, eff_handles, pitches, offsets, buf_id, flags) : -1;
-    if (ret == 0 && buf_id && *buf_id > 0 && *buf_id < 256 && bo_handles) {
-        g_fb_id_to_handle[*buf_id] = bo_handles[0];
-    }
     kmsg_log("[GPU-KMS] <<< drmModeAddFB2 RET=%d, fb_id=%u (errno=%d)\n", ret, buf_id ? *buf_id : 0, ret < 0 ? errno : 0);
     return ret;
 }

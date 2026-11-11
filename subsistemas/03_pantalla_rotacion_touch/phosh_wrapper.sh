@@ -42,7 +42,22 @@ done
 sleep 0.5
 
 # 3. Propagar entorno completo a D-Bus de sesión para activación de servicios y GNOME Settings
+cat << 'EOF_ENV' > /etc/profile.d/phosh-cairo.sh
+export GSK_RENDERER=cairo
+export QT_QUICK_BACKEND=software
+export NO_AT_BRIDGE=1
+EOF_ENV
+mkdir -p /usr/local/bin 2>/dev/null || true
+cat << 'EOF_GCC' > /usr/local/bin/gnome-control-center
+#!/bin/sh
+export XDG_CURRENT_DESKTOP=GNOME
+export GSK_RENDERER=cairo
+exec /usr/bin/gnome-control-center "$@"
+EOF_GCC
+chmod 755 /usr/local/bin/gnome-control-center 2>/dev/null || true
 dbus-update-activation-environment --all 2>/dev/null || true
+dbus-update-activation-environment --systemd GSK_RENDERER=cairo GDK_BACKEND=wayland WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root XDG_CURRENT_DESKTOP=GNOME:Phosh XDG_SESSION_DESKTOP=phosh NO_AT_BRIDGE=1 2>/dev/null || true
+gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.UpdateActivationEnvironment "{'GSK_RENDERER': 'cairo', 'GDK_BACKEND': 'wayland', 'WAYLAND_DISPLAY': 'wayland-0', 'XDG_RUNTIME_DIR': '/tmp/runtime-root', 'XDG_CURRENT_DESKTOP': 'GNOME:Phosh', 'XDG_SESSION_DESKTOP': 'phosh', 'NO_AT_BRIDGE': '1'}" >/dev/null 2>&1 || true
 
 # 4. Iniciar demonio de RFKILL para control y conmutación de Bluetooth y modo avión
 if ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
@@ -55,6 +70,8 @@ gsettings set org.gnome.settings-daemon.plugins.color active false 2>/dev/null |
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
 gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
+gsettings set org.gnome.desktop.interface show-battery-percentage true 2>/dev/null || true
+dconf write /org/gnome/desktop/interface/show-battery-percentage true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
 # 6. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
