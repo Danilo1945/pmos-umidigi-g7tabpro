@@ -161,36 +161,79 @@ def set_backlight_hardware(level):
         except Exception:
             pass
 
-def set_cpu_and_gpu_power(performance=True):
-    gov = "performance" if performance else "powersave"
-    for g in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+def set_cpu_and_gpu_power(active=True):
+    if active:
+        # 1. Reanimar núcleos secundarios 1 a 7 si estaban apagados
+        for c in range(1, 8):
+            p = f"/sys/devices/system/cpu/cpu{c}/online"
+            try:
+                if os.path.exists(p):
+                    with open(p, "w") as f:
+                        f.write("1\n")
+            except Exception:
+                pass
+
+        # 2. Gobernador dinámico inteligente schedutil (estilo Android / EAS)
+        for g in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+            try:
+                with open(g, "w") as f:
+                    f.write("schedutil\n")
+            except Exception:
+                pass
+
+        # 3. Escalado dinámico de GPU ARM Mali-G57 MC2 (simple_ondemand, 390 MHz a 812 MHz)
         try:
-            with open(g, "w") as f:
-                f.write(f"{gov}\n")
+            if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
+                with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
+                    f.write("-1\n")  # Liberar frecuencia fija
+            for mf in glob.glob("/sys/class/devfreq/*mali/max_freq"):
+                with open(mf, "w") as f:
+                    f.write("812000000\n")
+            for mf in glob.glob("/sys/class/devfreq/*mali/min_freq"):
+                with open(mf, "w") as f:
+                    f.write("390000000\n")
+            for mg in glob.glob("/sys/class/devfreq/*mali/governor"):
+                with open(mg, "w") as f:
+                    f.write("simple_ondemand\n")
+        except Exception:
+            pass
+    else:
+        # Reposo / Deep Standby:
+        # 1. CPU0 al mínimo (powersave a 500 MHz)
+        g0 = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+        try:
+            if os.path.exists(g0):
+                with open(g0, "w") as f:
+                    f.write("powersave\n")
         except Exception:
             pass
 
-    # Escalado de GPU ARM Mali-G57 MC2
-    try:
-        if performance:
+        # 2. Apagar núcleos 1 a 7 (CPU Hotplug para cortar corriente estática masivamente)
+        for c in range(1, 8):
+            p = f"/sys/devices/system/cpu/cpu{c}/online"
+            try:
+                if os.path.exists(p):
+                    with open(p, "w") as f:
+                        f.write("0\n")
+            except Exception:
+                pass
+
+        # 3. Fijar GPU Mali a frecuencia mínima (390 MHz)
+        try:
             if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
                 with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
-                    f.write("15\n")  # 812 MHz
-            for mg in glob.glob("/sys/class/devfreq/*.mali/governor"):
-                with open(mg, "w") as f:
-                    f.write("performance\n")
-            for mf in glob.glob("/sys/class/devfreq/*.mali/min_freq"):
-                with open(mf, "w") as f:
-                    f.write("812000000\n")
-        else:
-            if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
-                with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
-                    f.write("37\n")  # 390 MHz (mínimo consumo en reposo)
-            for mf in glob.glob("/sys/class/devfreq/*.mali/min_freq"):
+                    f.write("37\n")
+            for mf in glob.glob("/sys/class/devfreq/*mali/max_freq"):
                 with open(mf, "w") as f:
                     f.write("390000000\n")
-    except Exception:
-        pass
+            for mf in glob.glob("/sys/class/devfreq/*mali/min_freq"):
+                with open(mf, "w") as f:
+                    f.write("390000000\n")
+            for mg in glob.glob("/sys/class/devfreq/*mali/governor"):
+                with open(mg, "w") as f:
+                    f.write("powersave\n")
+        except Exception:
+            pass
 
 def lock_screen():
     """Activa el bloqueo de pantalla de Phosh (org.gnome.ScreenSaver.Lock) de forma asíncrona e instantánea."""
@@ -247,7 +290,7 @@ def ensure_desired_orientation(force=False, async_exec=False):
 
 def sleep_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Reposo/Bloqueo activado: bloqueando Phosh, apagando pantalla y reduciendo consumo CPU/GPU...", flush=True)
+    print("[*] Reposo profundo activado: bloqueando Phosh, congelando apps, apagando pantalla y cores...", flush=True)
     cur = get_current_backlight()
     if cur >= MIN_SAFE_BRIGHTNESS:
         saved_backlight_level = min(cur, MAX_SAFE_BRIGHTNESS)
@@ -263,6 +306,9 @@ def sleep_tablet():
     # 3. Bloquear sesión de Phosh para que al encender aparezca el Lockscreen
     lock_screen()
 
+    # 4. Congelar navegadores y procesos de fondo pesados (cero consumo de CPU por scripts/JS)
+    subprocess.call("killall -STOP firefox-real firefox 2>/dev/null || true", shell=True)
+
     if login1_dbus_conn:
         try:
             from gi.repository import GLib
@@ -273,10 +319,13 @@ def sleep_tablet():
         except Exception:
             pass
 
-    # 4. Gobernadores de CPU en powersave y GPU en 390 MHz
-    set_cpu_and_gpu_power(performance=False)
+    # 5. Reducción drástica de energía: CPU0 a powersave, cores 1 a 7 apagados, GPU a 390 MHz
+    set_cpu_and_gpu_power(active=False)
 
-    print("[*] Tablet en reposo: pantalla bloqueada a 0 nits, táctil inhibido, CPU en powersave, GPU en 390 MHz.", flush=True)
+    # 6. Sincronizar buffers a disco
+    subprocess.call("sync", shell=True)
+
+    print("[*] Tablet en reposo profundo: pantalla 0 nits, cores 1-7 apagados, GPU 390 MHz, apps congeladas.", flush=True)
 
 def _post_wake_verify():
     for delay in (0.12, 0.25, 0.50):
@@ -287,19 +336,22 @@ def _post_wake_verify():
 
 def wake_tablet():
     global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Despertando tablet: reactivando aceleración GPU/CPU, salida DSI-1 en 180° y Lockscreen...", flush=True)
+    print("[*] Despertando tablet: encendiendo cores, schedutil, GPU dinámica y salida de pantalla...", flush=True)
     is_screen_on = True
 
-    # 1. Restaurar CPUs a performance (2.2 GHz) y GPU Mali a 812 MHz ANTES de despertar Wayland (cero lag)
-    set_cpu_and_gpu_power(performance=True)
+    # 1. Encender los 8 núcleos de CPU y habilitar schedutil + GPU Mali dinámica
+    set_cpu_and_gpu_power(active=True)
 
-    # 2. Reactivar salida DSI-1 (--on) y forzar Transform: 180 síncronamente ANTES de liberar el touch
+    # 2. Descongelar navegadores y procesos pausados
+    subprocess.call("killall -CONT firefox-real firefox 2>/dev/null || true", shell=True)
+
+    # 3. Reactivar salida DSI-1 (--on) y forzar Transform: 180 síncronamente ANTES de liberar el touch
     ensure_desired_orientation(force=True, async_exec=False)
 
-    # 3. Liberar bloqueo del panel táctil (ya sincronizado con DSI-1 en Transform: 180)
+    # 4. Liberar bloqueo del panel táctil (ya sincronizado con DSI-1 en Transform: 180)
     grab_touchscreen(grab=False)
 
-    # 4. Restaurar brillo LCD seguro de inmediato
+    # 5. Restaurar brillo LCD seguro de inmediato
     target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
     set_backlight_hardware(target_b)
 
@@ -313,10 +365,10 @@ def wake_tablet():
         except Exception:
             pass
 
-    # 5. Verificación post-wake en segundo plano por si Phosh reconfigura el monitor al despertar
+    # 6. Verificación post-wake en segundo plano por si Phosh reconfigura el monitor al despertar
     threading.Thread(target=_post_wake_verify, daemon=True).start()
 
-    print(f"[*] Tablet activa en pantalla de bloqueo: brillo {target_b}, DSI-1 180°, GPU Mali a 812 MHz.", flush=True)
+    print(f"[*] Tablet activa: brillo {target_b}, 8 cores online en schedutil, GPU dinámica lista.", flush=True)
 
 def toggle_screen_power():
     global last_power_press_time, is_screen_on
@@ -745,9 +797,10 @@ def get_grabbed_devices():
     return devs
 
 def main():
-    print("[+] tablet_power_daemon v3: Iniciando controlador de botón Power, Volumen, Brillo y Suspensión...", flush=True)
+    print("[+] tablet_power_daemon v4: Iniciando controlador optimizado (schedutil, Hotplug deep standby)...", flush=True)
     release_static_backlight_locks()
     set_backlight_hardware(saved_backlight_level)
+    set_cpu_and_gpu_power(active=True)
 
     try:
         subprocess.call("HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null", shell=True)
