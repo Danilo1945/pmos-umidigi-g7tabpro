@@ -1,21 +1,33 @@
-# Repositorio Maestro de Funcionalidades Finales y Versionamiento
-## UMIDIGI G7 Tab Pro (`TG2403GBA`) - SoC MediaTek Helio G99 (`MT6789`)
-### postmarketOS Edge (Alpine Linux aarch64 - Kernel 5.10.185-pmos)
+# pmos-umidigi-g7tabpro
+## postmarketOS & Linux Bringup para UMIDIGI G7 Tab Pro (`TG2403GBA`)
+### SoC MediaTek Helio G99 (`MT6789`) | postmarketOS Edge (Alpine Linux aarch64 - Kernel 5.10.185-pmos)
 
-**Versión:** v16.0 Master Unificada (GPU Wayland + Todos los Subsistemas) | **Documentación Técnica Principal:** [`DOCUMENTACION_COMPLETA.md`](./DOCUMENTACION_COMPLETA.md)
+[![postmarketOS](https://img.shields.io/badge/postmarketOS-Edge-green.svg)](https://postmarketos.org/)
+[![SoC](https://img.shields.io/badge/SoC-MediaTek%20Helio%20G99%20(MT6789)-orange.svg)](https://www.mediatek.com/)
+[![GPU](https://img.shields.io/badge/GPU-Mali--G57%20MC2%20(Acelerada)-blue.svg)]()
+[![VPU](https://img.shields.io/badge/VPU%2FVDEC-H.264%2FHEVC%2FVP9%20Hardware-brightgreen.svg)]()
+[![Battery](https://img.shields.io/badge/Power-Android--Style%20Deep%20Standby-purple.svg)]()
+[![i18n](https://img.shields.io/badge/i18n-Espa%C3%B1ol%20%2F%20English-yellow.svg)]()
+
+**Versión:** v16.0 Master Unificada (GPU Wayland + Hardware VDEC + Gestión de Energía Avanzada) | **Documentación Técnica Principal:** [`DOCUMENTACION_COMPLETA.md`](./DOCUMENTACION_COMPLETA.md)
 
 ---
 
 ## 📌 Propósito de este Repositorio
-Este repositorio consolida **todas las funcionalidades estables y probadas en hardware real** de la tablet UMIDIGI G7 Tab Pro:
-- Auto-boot incondicional en frío a escritorio Phosh en ~12 segundos.
-- **Interfaz Wayland/Phosh acelerada 100% por hardware GPU ARM Mali-G57 MC2** (`WLR_RENDERER=gles2`, `GSK_RENDERER=gl`, `libgpu_interface_driver.so`, SIMD ARM NEON x8, 60 FPS fluidos a 812 MHz OPP 15).
-- Control de energía por botón físico Power y menú táctil "Suspender" vía D-Bus `login1`, con escalado dinámico de CPU (`performance` <-> `powersave`) y GPU (`812 MHz` <-> `390 MHz`).
-- Bloqueo de pantalla (Lockscreen) protegido con PIN `1234` y teclado en pantalla `squeekboard`.
-- Pantalla rotada 180° y táctil multitouch 1:1 de precisión con `tddi_9551_patched.ko` y `libseat_direct.so`.
-- Cuádruple amplificador inteligente de audio AW87359 con PipeWire y detección de Jack 3.5mm.
-- Carga rápida 2A en PMIC MT6375 con telemetría OCV e indicador UPower D-Bus en Phosh.
-- Conectividad Wi-Fi 802.11ac gestionada por NetworkManager.
+Este repositorio consolida **todas las funcionalidades estables y probadas en silicio real** de la tablet UMIDIGI G7 Tab Pro:
+- **Auto-boot incondicional en frío** a escritorio Phosh en ~12 segundos.
+- **Interfaz Wayland/Phosh acelerada al 100% por hardware GPU ARM Mali-G57 MC2** (`WLR_RENDERER=gles2`, `libgpu_interface_driver.so`, SIMD ARM NEON x8, 60 FPS fluidos).
+- **Aceleración por Hardware de Video (VPU/VDEC `/dev/video0`):** Driver MediaTek VDEC reconstruido mediante ingeniería inversa, con soporte nativo V4L2 M2M para decodificación fluida 1080p/4K de **H.264, HEVC (H.265), VP9 y VP8** en Firefox, MPV y Chromium.
+- **Gestión de Energía Estilo Android (Deep Standby):**
+  - Gobernador inteligente **`schedutil`** (EAS) en uso activo (escala de 500 MHz a 2.2 GHz).
+  - Escalado dinámico devfreq de la GPU Mali (`simple_ondemand`, 390 MHz a 812 MHz).
+  - Reposo profundo con **CPU Hotplug**: apaga 7 de los 8 núcleos de CPU en reposo para eliminar el consumo estático, congelador de apps de fondo (`killall -STOP`) y suspensión de pantalla a 0 nits.
+  - Botón de **Suspender / Reposo** habilitado directamente en el panel de control de Phosh y vinculado al botón físico de encendido.
+- **Soporte Bilingüe Completo (Español / Inglés):** Selector de idioma del sistema operativo (`set_language es/en`, `toggle_language`), teclado táctil Squeekboard con botón de alternancia rápida entre distribución en Español (`ñ`) e Inglés (US), y traducciones completas en Phosh y GTK.
+- **Pantalla y Táctil:** Novatek NT36672E a 1200x1920 @ 60Hz rotada a 180° y táctil multitouch 1:1 de precisión con `tddi_9551_patched.ko` y `libseat_direct.so`.
+- **Audio Cuádruple:** Amplificadores inteligentes AW87359 con enrutamiento ALSA/PipeWire y detección de Jack 3.5mm.
+- **Batería y Carga Rápida:** Carga a 2A en PMIC MT6375 con telemetría OCV e indicador UPower D-Bus nativo en Phosh.
+- **Conectividad:** Wi-Fi 802.11ac y Bluetooth gestionados por NetworkManager y WMT.
 
 Sirve como **código fuente canónico y punto de restauración determinista**: si en el desarrollo futuro se altera alguna configuración, cualquier subsistema puede restaurarse instantáneamente con un comando.
 
