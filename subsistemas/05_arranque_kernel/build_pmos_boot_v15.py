@@ -1052,11 +1052,8 @@ done) &
     /usr/bin/busybox-extras telnetd -p 23 -l /sbin/pmos_getty 2>/dev/null || sleep 1
 done) &
 
-# 3. Sincronización periódica de telemetría a partición misc
-(while true; do
-    sync_debug_to_misc 2>/dev/null || true
-    sleep 0.5
-done) &
+# 3. Sincronización única de telemetría a partición misc durante arranque temprano
+sync_debug_to_misc 2>/dev/null || true
 
 # 3.5 Carga de infraestructura esencial de hardware (SCMI, PMIC, UFS, Clocks, DRM, Touch, Teclas, Wi-Fi, CPUFreq)
 echo ">> [pmOS-v13] Cargando controladores de hardware UFS, Pantalla, Touchscreen, Wi-Fi y CPUFreq..." > /dev/kmsg
