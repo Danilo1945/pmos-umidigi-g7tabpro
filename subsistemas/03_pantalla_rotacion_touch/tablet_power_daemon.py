@@ -26,8 +26,8 @@ KEY_POWER      = 116
 
 EVIOCGRAB = 0x40044590
 
-MIN_SAFE_BRIGHTNESS = 15
-MAX_SAFE_BRIGHTNESS = 100
+MIN_SAFE_BRIGHTNESS = 10
+MAX_SAFE_BRIGHTNESS = 255
 
 is_screen_on = True
 saved_backlight_level = 35
@@ -148,9 +148,9 @@ def set_backlight_hardware(level):
     for bp in BACKLIGHT_PATHS:
         try:
             if os.path.exists(bp):
-                os.chmod(bp, 0o666)
                 with open(bp, "w") as f:
                     f.write(f"{level}\n")
+                break
         except Exception:
             pass
     for dp in ["/run/dummy_brightness", "/sysroot/run/dummy_brightness"]:
@@ -270,9 +270,55 @@ def lock_screen():
     except Exception as e:
         print(f"[-] Error en ScreenSaver.Lock: {e}", flush=True)
 
+saved_transform = "180"
+
+def get_current_transform():
+    """Lee la transformación actual de DSI-1 (ej. '180', '90', '270', 'normal')."""
+    wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
+    try:
+        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} 2>/dev/null || true"
+        out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("Transform:"):
+                val = line.split(":", 1)[1].strip()
+                if val in ("normal", "90", "180", "270"):
+                    return val
+    except Exception:
+        pass
+    return saved_transform
+
+def check_and_remap_rotation():
+    """Mapea el botón Rotar de Phosh entre 180° (vertical derecho) y 90° (horizontal del lado del estuche)."""
+    global saved_transform
+    if not is_screen_on or _sleeping_in_kernel or time.time() < _resume_lock_until:
+        return
+    curr = get_current_transform()
+    if curr == saved_transform:
+        return
+    if curr in ("180", "90"):
+        saved_transform = curr
+        return
+    if curr == "normal":
+        target = "90" if saved_transform == "180" else "180"
+    elif curr == "270":
+        target = "90"
+    else:
+        return
+    saved_transform = target
+    wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
+    try:
+        subprocess.call(
+            f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} --output DSI-1 --transform {target} 2>/dev/null || true",
+            shell=True,
+        )
+        print(f"[*] Rotación remapeada: {curr} -> {target}", flush=True)
+    except Exception:
+        pass
+
 def ensure_desired_orientation(force=False, async_exec=False):
-    global current_sensor_orientation
-    target_transform = "180" if current_sensor_orientation == "bottom-up" else ("90" if current_sensor_orientation == "left-up" else "normal")
+    global saved_transform
+    target_transform = saved_transform
     wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
     try:
         if not force:
@@ -288,44 +334,116 @@ def ensure_desired_orientation(force=False, async_exec=False):
     except Exception:
         pass
 
-def sleep_tablet():
-    global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Reposo profundo activado: bloqueando Phosh, congelando apps, apagando pantalla y cores...", flush=True)
-    cur = get_current_backlight()
-    if cur >= MIN_SAFE_BRIGHTNESS:
-        saved_backlight_level = min(cur, MAX_SAFE_BRIGHTNESS)
+def set_display_output(on=True):
+    """Enciende o apaga físicamente la salida DSI-1 en Phoc/wlroots."""
+    global saved_transform
+    target_transform = saved_transform
+    wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
+    try:
+        if on:
+            cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} --output DSI-1 --on --transform {target_transform} 2>/dev/null || true"
+        else:
+            cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} --output DSI-1 --off 2>/dev/null || true"
+        subprocess.call(cmd, shell=True)
+    except Exception:
+        pass
 
-    is_screen_on = False
+def set_wifi_radio(on=True):
+    """Activa o desactiva el radio Wi-Fi para evitar despertares por IRQ 149 (wlan0) durante s2idle."""
+    state = "on" if on else "off"
+    try:
+        subprocess.call(f"chroot /sysroot /usr/bin/nmcli radio wifi {state} 2>/dev/null || nmcli radio wifi {state} 2>/dev/null || ip link set wlan0 {'up' if on else 'down'} 2>/dev/null || true", shell=True)
+    except Exception:
+        pass
 
-    # 1. Apagar backlight físico a 0 de inmediato para respuesta visual instantánea
-    set_backlight_hardware(0)
-
-    # 2. Bloquear toques en el panel táctil mientras la pantalla está apagada
-    grab_touchscreen(grab=True)
-
-    # 3. Bloquear sesión de Phosh para que al encender aparezca el Lockscreen
-    lock_screen()
-
-    # 4. Congelar navegadores y procesos de fondo pesados (cero consumo de CPU por scripts/JS)
-    subprocess.call("killall -STOP firefox-real firefox 2>/dev/null || true", shell=True)
-
-    if login1_dbus_conn:
+def enter_kernel_s2idle():
+    """Intenta suspender el SoC en s2idle (/sys/power/state = mem). Retorna True si durmió y despertó."""
+    for attempt in range(4):
         try:
-            from gi.repository import GLib
-            login1_dbus_conn.emit_signal(
-                None, '/org/freedesktop/login1', 'org.freedesktop.login1.Manager',
-                'PrepareForSleep', GLib.Variant('(b)', (True,))
-            )
-        except Exception:
-            pass
+            with open("/sys/power/state", "w") as f:
+                f.write("mem\n")
+            return True
+        except Exception as e:
+            print(f"[-] Intento {attempt+1} de s2idle falló ({e}), reintentando...", flush=True)
+            time.sleep(0.5)
+    return False
 
-    # 5. Reducción drástica de energía: CPU0 a powersave, cores 1 a 7 apagados, GPU a 390 MHz
-    set_cpu_and_gpu_power(active=False)
+_bt_was_running = False
+_resume_lock_until = 0.0
+_sleeping_in_kernel = False
+_power_state_lock = threading.Lock()
 
-    # 6. Sincronizar buffers a disco
-    subprocess.call("sync", shell=True)
+def sleep_tablet():
+    global is_screen_on, saved_backlight_level, saved_transform, login1_dbus_conn, _bt_was_running, _resume_lock_until, _sleeping_in_kernel
+    if not _power_state_lock.acquire(blocking=False):
+        return
+    try:
+        if not is_screen_on:
+            return
+        print("[*] Suspensión real (s2idle): bloqueando Phosh, apagando DSI-1, radios y entrando a mem...", flush=True)
+        cur = get_current_backlight()
+        if cur >= MIN_SAFE_BRIGHTNESS:
+            saved_backlight_level = min(cur, MAX_SAFE_BRIGHTNESS)
+        saved_transform = get_current_transform()
 
-    print("[*] Tablet en reposo profundo: pantalla 0 nits, cores 1-7 apagados, GPU 390 MHz, apps congeladas.", flush=True)
+        is_screen_on = False
+
+        # 1. Apagar backlight físico a 0 de inmediato
+        set_backlight_hardware(0)
+
+        # 2. Bloquear toques en el panel táctil mientras la pantalla está apagada
+        grab_touchscreen(grab=True)
+
+        # 3. Bloquear sesión de Phosh para que al despertar aparezca el Lockscreen
+        lock_screen()
+        time.sleep(0.08)
+
+        # 4. Apagar salida DSI-1 y pausar phoc para que no la reactive ni retenga disp_crtc0_wakelock
+        set_display_output(on=False)
+        time.sleep(0.05)
+        subprocess.call("killall -STOP phoc 2>/dev/null || true", shell=True)
+
+        # 5. Congelar navegadores y cerrar /dev/stpbt (Bluetooth) para liberar 1100c000.btif
+        subprocess.call("killall -STOP firefox-real firefox 2>/dev/null || true", shell=True)
+        bt_check = subprocess.run("pgrep -f tablet_bt_daemon.py >/dev/null 2>&1", shell=True)
+        _bt_was_running = (bt_check.returncode == 0)
+        if _bt_was_running:
+            subprocess.call("pkill -f tablet_bt_daemon.py 2>/dev/null || true; pkill -f btattach 2>/dev/null || true", shell=True)
+
+        # 6. Desactivar Wi-Fi para evitar que IRQ 149 (wlan0) despierte el s2idle inmediatamente
+        set_wifi_radio(on=False)
+
+        if login1_dbus_conn:
+            try:
+                from gi.repository import GLib
+                login1_dbus_conn.emit_signal(
+                    None, '/org/freedesktop/login1', 'org.freedesktop.login1.Manager',
+                    'PrepareForSleep', GLib.Variant('(b)', (True,))
+                )
+            except Exception:
+                pass
+
+        # 7. Reducción drástica de energía previa al s2idle
+        set_cpu_and_gpu_power(active=False)
+
+        # 8. Sincronizar buffers y esperar a que STP-PSM / WMT entren en reposo
+        subprocess.call("sync", shell=True)
+        time.sleep(0.7)
+
+        # 9. Suspensión real de hardware (bloquea hasta que el usuario pulse Power)
+        print("[*] Entrando en /sys/power/state -> mem (s2idle)...", flush=True)
+        _sleeping_in_kernel = True
+        slept = enter_kernel_s2idle()
+        _resume_lock_until = time.time() + 1.5
+        _sleeping_in_kernel = False
+        if slept:
+            print("[*] Hardware despertó de s2idle!", flush=True)
+            wake_tablet()
+        else:
+            print("[-] No se pudo entrar en s2idle; quedando en reposo profundo por software.", flush=True)
+    finally:
+        _sleeping_in_kernel = False
+        _power_state_lock.release()
 
 def _post_wake_verify():
     for delay in (0.12, 0.25, 0.50):
@@ -334,16 +452,29 @@ def _post_wake_verify():
             return
         ensure_desired_orientation(force=False, async_exec=False)
 
+def _restore_radios_async():
+    time.sleep(0.3)
+    set_wifi_radio(on=True)
+    if _bt_was_running:
+        log_path = "/var/log/tablet_bt.log" if os.path.isdir("/var/log") else "/sysroot/var/log/tablet_bt.log"
+        if os.path.exists("/usr/bin/tablet_bt_daemon.py"):
+            subprocess.Popen(f"nohup python3 -u /usr/bin/tablet_bt_daemon.py >{log_path} 2>&1 &", shell=True)
+        elif os.path.exists("/sysroot/usr/bin/tablet_bt_daemon.py"):
+            subprocess.Popen("nohup chroot /sysroot /usr/bin/python3 -u /usr/bin/tablet_bt_daemon.py >/var/log/tablet_bt.log 2>&1 &", shell=True)
+
 def wake_tablet():
-    global is_screen_on, saved_backlight_level, login1_dbus_conn
-    print("[*] Despertando tablet: encendiendo cores, schedutil, GPU dinámica y salida de pantalla...", flush=True)
+    global is_screen_on, saved_backlight_level, login1_dbus_conn, last_power_press_time
+    print("[*] Despertando tablet: encendiendo cores, phoc, DSI-1, brillo y radios...", flush=True)
     is_screen_on = True
+    last_power_press_time = time.time()
 
     # 1. Encender los 8 núcleos de CPU y habilitar schedutil + GPU Mali dinámica
     set_cpu_and_gpu_power(active=True)
 
-    # 2. Descongelar navegadores y procesos pausados
+    # 2. Reanudar phoc y navegadores pausados
+    subprocess.call("killall -CONT phoc 2>/dev/null || true", shell=True)
     subprocess.call("killall -CONT firefox-real firefox 2>/dev/null || true", shell=True)
+    time.sleep(0.1)
 
     # 3. Reactivar salida DSI-1 (--on) y forzar Transform: 180 síncronamente ANTES de liberar el touch
     ensure_desired_orientation(force=True, async_exec=False)
@@ -355,6 +486,9 @@ def wake_tablet():
     target_b = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, saved_backlight_level))
     set_backlight_hardware(target_b)
 
+    # 6. Reactivar Wi-Fi y Bluetooth en segundo plano para no retrasar el encendido de pantalla
+    threading.Thread(target=_restore_radios_async, daemon=True).start()
+
     if login1_dbus_conn:
         try:
             from gi.repository import GLib
@@ -365,15 +499,15 @@ def wake_tablet():
         except Exception:
             pass
 
-    # 6. Verificación post-wake en segundo plano por si Phosh reconfigura el monitor al despertar
+    # 7. Verificación post-wake en segundo plano por si Phosh reconfigura el monitor al despertar
     threading.Thread(target=_post_wake_verify, daemon=True).start()
 
     print(f"[*] Tablet activa: brillo {target_b}, 8 cores online en schedutil, GPU dinámica lista.", flush=True)
 
 def toggle_screen_power():
-    global last_power_press_time, is_screen_on
+    global last_power_press_time, is_screen_on, _resume_lock_until, _sleeping_in_kernel
     now = time.time()
-    if now - last_power_press_time < 0.35:
+    if _sleeping_in_kernel or now < _resume_lock_until or (now - last_power_press_time < 0.5):
         return
     last_power_press_time = now
 
@@ -418,7 +552,23 @@ def show_volume_osd(vol, is_muted=False):
     except Exception as e:
         print(f"[-] Error mostrando OSD de volumen: {e}", flush=True)
 
+def _run_audio_cmd(cmd):
+    if os.path.exists("/usr/bin/pactl"):
+        return subprocess.run(f"XDG_RUNTIME_DIR=/tmp/runtime-root {cmd} 2>/dev/null", shell=True, capture_output=True, text=True)
+    return subprocess.run(f"chroot /sysroot env XDG_RUNTIME_DIR=/tmp/runtime-root {cmd} 2>/dev/null", shell=True, capture_output=True, text=True)
+
 def get_pipewire_volume():
+    """Lee el volumen en la misma escala porcentual cúbica de PulseAudio/Phosh."""
+    try:
+        res_v = _run_audio_cmd("pactl get-sink-volume @DEFAULT_SINK@")
+        res_m = _run_audio_cmd("pactl get-sink-mute @DEFAULT_SINK@")
+        is_muted = "yes" in res_m.stdout.lower()
+        import re
+        m = re.search(r'(\d+)%', res_v.stdout)
+        if m:
+            return min(1.0, max(0.0, int(m.group(1)) / 100.0)), is_muted
+    except Exception:
+        pass
     try:
         res = subprocess.run(
             "XDG_RUNTIME_DIR=/tmp/runtime-root wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null",
@@ -436,20 +586,17 @@ def get_pipewire_volume():
 def adjust_volume(up=True):
     try:
         vol, is_muted = get_pipewire_volume()
+        pct = int(round(vol * 100))
         if up:
-            subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null", shell=True)
-            if vol <= 0.05 or is_muted:
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.10 2>/dev/null", shell=True)
-            else:
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null", shell=True)
+            _run_audio_cmd("pactl set-sink-mute @DEFAULT_SINK@ 0")
+            new_pct = min(100, pct + 5) if not is_muted else max(10, pct)
+            _run_audio_cmd(f"pactl set-sink-volume @DEFAULT_SINK@ {new_pct}%")
         else:
-            if vol <= 0.06:
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.0 2>/dev/null", shell=True)
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>/dev/null", shell=True)
-            else:
-                subprocess.run("XDG_RUNTIME_DIR=/tmp/runtime-root wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null", shell=True)
+            new_pct = max(0, pct - 5)
+            _run_audio_cmd(f"pactl set-sink-volume @DEFAULT_SINK@ {new_pct}%")
+            _run_audio_cmd(f"pactl set-sink-mute @DEFAULT_SINK@ {1 if new_pct == 0 else 0}")
         vol, is_muted = get_pipewire_volume()
-        print(f"[+] Volumen ajustado: {int(vol * 100)}% (muted={is_muted})", flush=True)
+        print(f"[+] Volumen ajustado: {int(round(vol * 100))}% (muted={is_muted})", flush=True)
         show_volume_osd(vol, is_muted)
     except Exception as e:
         print(f"[-] Error ajustando volumen: {e}", flush=True)
@@ -532,10 +679,11 @@ def start_dbus_services():
         if method == "SetBrightness":
             sub, dev, val = params.unpack()
             val_int = max(MIN_SAFE_BRIGHTNESS, min(MAX_SAFE_BRIGHTNESS, int(val)))
-            saved_backlight_level = val_int
-            if is_screen_on:
-                set_backlight_hardware(val_int)
             invocation.return_value(None)
+            if val_int != saved_backlight_level:
+                saved_backlight_level = val_int
+                if is_screen_on:
+                    set_backlight_hardware(val_int)
         elif method == "GetSession":
             invocation.return_value(GLib.Variant('(o)', ('/org/freedesktop/login1/session/auto',)))
         elif method == "CanSuspend":
@@ -546,19 +694,20 @@ def start_dbus_services():
             invocation.return_value(GLib.Variant('(s)', ('yes',)))
         elif method == "Suspend":
             print("[*] DBus login1.Manager.Suspend llamado desde la GUI de Phosh!", flush=True)
-            sleep_tablet()
             invocation.return_value(None)
+            if is_screen_on:
+                threading.Thread(target=sleep_tablet, daemon=True).start()
         elif method == "Wake":
             print("[*] DBus login1.Manager.Wake llamado!", flush=True)
             wake_tablet()
             invocation.return_value(None)
         elif method == "PowerOff":
             print("[*] DBus login1.Manager.PowerOff llamado!", flush=True)
-            subprocess.call("sync; poweroff", shell=True)
+            subprocess.Popen("sync; sleep 0.2; /bin/busybox poweroff -f 2>/dev/null || poweroff -f", shell=True)
             invocation.return_value(None)
         elif method == "Reboot":
             print("[*] DBus login1.Manager.Reboot llamado!", flush=True)
-            subprocess.call("sync; reboot", shell=True)
+            subprocess.Popen("sync; sleep 0.2; /bin/busybox reboot -f 2>/dev/null || reboot -f", shell=True)
             invocation.return_value(None)
         else:
             invocation.return_value(None)
@@ -633,7 +782,7 @@ def start_dbus_services():
 
     def handle_sensor_get_prop(conn, sender, path, iface, prop):
         if prop == 'HasAccelerometer':
-            return GLib.Variant('b', True)
+            return GLib.Variant('b', False)
         elif prop == 'AccelerometerOrientation':
             return GLib.Variant('s', current_sensor_orientation)
         elif prop == 'HasAmbientLight':
@@ -725,11 +874,11 @@ def start_dbus_services():
     def handle_session_method(conn, sender, path, iface, method, params, invocation):
         if method == "Shutdown":
             print("[*] SessionManager.Shutdown llamado!", flush=True)
-            subprocess.call("sync; poweroff", shell=True)
+            subprocess.Popen("sync; sleep 0.2; /bin/busybox poweroff -f 2>/dev/null || poweroff -f", shell=True)
             invocation.return_value(None)
         elif method == "Reboot":
             print("[*] SessionManager.Reboot llamado!", flush=True)
-            subprocess.call("sync; reboot", shell=True)
+            subprocess.Popen("sync; sleep 0.2; /bin/busybox reboot -f 2>/dev/null || reboot -f", shell=True)
             invocation.return_value(None)
         elif method == "CanShutdown":
             invocation.return_value(GLib.Variant('(b)', (True,)))
@@ -813,16 +962,27 @@ def main():
     devs = get_grabbed_devices()
 
     last_check_hw = time.time()
+    last_check_rot = time.time()
+    last_save_time = 0.0
 
     while True:
         now = time.time()
+        if now - last_check_rot > 0.4:
+            last_check_rot = now
+            check_and_remap_rotation()
+        if now > 1700000000 and (now - last_save_time > 60.0):
+            last_save_time = now
+            try:
+                with open("/var/lib/last_valid_time", "w") as tf:
+                    tf.write(str(int(now)) + "\n")
+            except Exception:
+                pass
         if now - last_check_hw > 2.0:
             last_check_hw = now
             if is_screen_on:
                 cur_b = get_current_backlight()
                 if cur_b < MIN_SAFE_BRIGHTNESS or cur_b > MAX_SAFE_BRIGHTNESS:
                     set_backlight_hardware(saved_backlight_level)
-                ensure_desired_orientation(force=False)
 
         if not devs:
             time.sleep(1)

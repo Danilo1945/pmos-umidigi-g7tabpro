@@ -13,6 +13,9 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
+export LANG=es_EC.UTF-8
+export LC_ALL=es_EC.UTF-8
+export LANGUAGE=es_EC:es
 
 # Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
 export GSK_RENDERER=gl
@@ -47,10 +50,18 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill
+dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND HOME LANG LC_ALL LANGUAGE 2>/dev/null || true
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi
+chmod 666 /dev/rfkill 2>/dev/null || true
+if [ -x /usr/libexec/gsd-rfkill ] && ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
+    /usr/libexec/gsd-rfkill >/var/log/gsd-rfkill.log 2>&1 &
+fi
 
 echo "[wrapper] Lanzando sesion GNOME Mobile Phosh con aceleracion GPU completa..." >> /var/log/phosh_user.log
+if [ -f /usr/lib/libphosh_backlight_shim.so ]; then
+    exec env LD_PRELOAD=/usr/lib/libphosh_backlight_shim.so /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
+fi
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1

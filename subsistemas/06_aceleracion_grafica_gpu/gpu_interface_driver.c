@@ -3028,6 +3028,84 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
         if (alpha_scale > 256u) alpha_scale = 256u;
 
+        /* Detección de quads rotados (90°/270°) o invertidos mediante mapeo afín 2D (sx, sy) -> (u, v) */
+        float dx_a = sx[2] - sx[0], dy_a = sy[2] - sy[0];
+        float dx_b = sx[1] - sx[0], dy_b = sy[1] - sy[0];
+        if (fabsf(dx_b) > 1.0f || fabsf(dy_a) > 1.0f || dx_a < -1.0f || dy_b < -1.0f) {
+            float det = dx_a * dy_b - dx_b * dy_a;
+            if (fabsf(det) > 1e-3f) {
+                int span_w = rx1 - rx0;
+                if (span_w > 0 && span_w <= 2048) {
+                    int dst_col_start = fb_w - rx1;
+                    if (dst_col_start >= 0 && dst_col_start + span_w <= fb_w) {
+                        float inv_det = 1.0f / det;
+                        float du_a = u[2] - u[0], du_b = u[1] - u[0];
+                        float dv_a = v[2] - v[0], dv_b = v[1] - v[0];
+                        float du_dx = ( du_a * dy_b - du_b * dy_a) * inv_det * (float)tw;
+                        float du_dy = (-du_a * dx_b + du_b * dx_a) * inv_det * (float)tw;
+                        float dv_dx = ( dv_a * dy_b - dv_b * dy_a) * inv_det * (float)th;
+                        float dv_dy = (-dv_a * dx_b + dv_b * dx_a) * inv_det * (float)th;
+
+                        float dsx0 = (float)rx0 + 0.5f - sx[0];
+                        float dsy0 = (float)ry0 + 0.5f - sy[0];
+                        float a0 = ( dsx0 * dy_b - dsy0 * dx_b) * inv_det;
+                        float b0 = (-dsx0 * dy_a + dsy0 * dx_a) * inv_det;
+                        float u0_px = (u[0] + a0 * du_a + b0 * du_b) * (float)tw;
+                        float v0_px = (v[0] + a0 * dv_a + b0 * dv_b) * (float)th;
+
+                        int32_t du_dx_fp = (int32_t)(du_dx * 65536.0f);
+                        int32_t dv_dx_fp = (int32_t)(dv_dx * 65536.0f);
+                        int32_t du_dy_fp = (int32_t)(du_dy * 65536.0f);
+                        int32_t dv_dy_fp = (int32_t)(dv_dy * 65536.0f);
+                        int32_t u_row_fp = (int32_t)(u0_px * 65536.0f);
+                        int32_t v_row_fp = (int32_t)(v0_px * 65536.0f);
+
+                        uint32_t scaled_row[2048];
+                        uint32_t or_mask = (sp->is_tex == 2) ? 0xFF000000u : 0u;
+                        const uint32_t *tex_px = st->pixels;
+
+                        for (int py = ry0; py < ry1; py++) {
+                            int target_py = fb_h - 1 - py;
+                            uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                            int32_t u_fp = u_row_fp;
+                            int32_t v_fp = v_row_fp;
+
+                            if (is_opaque_shader && alpha_scale >= 255u) {
+                                for (int i = 0; i < span_w; i++) {
+                                    int tx = u_fp >> 16;
+                                    int ty = v_fp >> 16;
+                                    u_fp += du_dx_fp;
+                                    v_fp += dv_dx_fp;
+                                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                                    if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+                                    dst_row[span_w - 1 - i] = tex_px[ty * tw + tx] | 0xFF000000u;
+                                }
+                            } else {
+                                for (int i = 0; i < span_w; i++) {
+                                    int tx = u_fp >> 16;
+                                    int ty = v_fp >> 16;
+                                    u_fp += du_dx_fp;
+                                    v_fp += dv_dx_fp;
+                                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                                    if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+                                    scaled_row[span_w - 1 - i] = tex_px[ty * tw + tx] | or_mask;
+                                }
+                                if (alpha_scale >= 255u) {
+                                    blend_row_neon(dst_row, scaled_row, span_w);
+                                } else {
+                                    blend_row_neon_alpha(dst_row, scaled_row, span_w, alpha_scale);
+                                }
+                            }
+                            u_row_fp += du_dy_fp;
+                            v_row_fp += dv_dy_fp;
+                        }
+                        sync_scanout_rect_to_peers(d, rx0, ry0, rx1, ry1);
+                    }
+                }
+                continue;
+            }
+        }
+
         /* Detección de coincidencia 1:1 en escala de píxeles (incluyendo sub-regiones UV de ventanas GTK4/libadwaita con sombras) */
         float src_sub_w = (u_right - u_left) * (float)tw;
         float src_sub_h = (v_bottom - v_top) * (float)th;

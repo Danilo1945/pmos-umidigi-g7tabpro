@@ -232,7 +232,7 @@ def compute_telemetry(charging):
 
     ibat_ma = read_ibat_ma(charging)
     chg_status = (read_val(f'{CHG_DIR}/status') or '').lower() if os.path.exists(CHG_DIR) else ''
-    is_full_hw = charging and ('full' in chg_status or (v_mv >= 4310 and ibat_ma < 180))
+    is_full_hw = charging and (v_mv >= 4320) and ('full' in chg_status or ibat_ma < 180)
 
     # Compensación bidireccional de resistencia interna (R_cell ~ 85 mOhm, R_chg_path ~ 120 mOhm)
     if is_full_hw:

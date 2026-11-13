@@ -57,7 +57,9 @@ FUNCIONALIDADES_FINALES/
 │   │   └── README_BATERIA.md          # Documentación técnica de energía y carga rápida
 │   │
 │   ├── 03_pantalla_rotacion_touch/    # 🖥️ Pantalla DSI, Touch, Phosh y Gestión de Energía
-│   │   ├── tablet_power_daemon.py     # ⚡ Demonio unificado Power, D-Bus login1, reposo, brillo y volumen
+│   │   ├── tablet_power_daemon.py     # ⚡ Demonio unificado Power, D-Bus login1, s2idle, rotación, brillo y volumen
+│   │   ├── phosh_backlight_shim.c     # Shim libgudev en espacio de usuario para slider de brillo en Phosh
+│   │   ├── libphosh_backlight_shim.so # Biblioteca compartida AArch64 inyectada en Phosh
 │   │   ├── libseat_direct.c           # Shim en C con soporte DRM_IOCTL_SET_MASTER
 │   │   ├── libseat_direct.so          # Biblioteca compartida compilada AArch64
 │   │   ├── tddi_9551_patched.ko       # Driver táctil Chipone TDDI parcheado (sin colisión GPIO)
@@ -147,11 +149,11 @@ LD_PRELOAD="/usr/lib/libmali-valhall-g57-wayland.so /usr/lib/libmali_shim.so" km
 | Subsistema | Componente Clave | Estado | Verificación Técnica |
 | :--- | :--- | :--- | :--- |
 | **Auto-boot** | Initramfs v15/v16 + tmpfs `/dev/shm` | ✅ **100% Funcional** | Arranque en frío en ~12 segundos directo a interfaz Phosh acelerada por GPU sin intervención manual. |
-| **Botón Power y Suspensión**| `tablet_power_daemon.py` | ✅ **100% Funcional** | Captura `EVIOCGRAB` en teclas físicas, suspensión vía D-Bus `org.freedesktop.login1`, escalado CPU/GPU, control de brillo `[15, 100]` / `0` y wake inmediato a 180°. |
-| **Audio** | ALSA MT6789 AFE + 4x AW87359 | ✅ **100% Funcional** | Sonido nítido en 4 altavoces, detección Jack 3.5mm, volumen calibrado sin distorsión ni siseo, control físico con OSD. |
-| **Batería** | PMIC MT6366 + MT6375 chg | ✅ **100% Funcional** | Carga rápida a 2A, curva OCV 7500mAh con compensación IR ($R_{int}=85\text{ m}\Omega$), telemetría ADC y servicio `upower_battery_provider.py` en Phosh. |
-| **Pantalla y Touch** | MIPI-DSI 1200x1920 + TDDI | ✅ **100% Funcional** | Sesión GNOME/Phosh con `libseat_direct.so`, rotación fija 180°, `tddi_9551_patched.ko` y matriz de calibración 1:1 (`-1 0 1 0 -1 1`). |
-| **Wi-Fi** | MediaTek MT6631 / WMT | ✅ **100% Funcional** | Interfaz `wlan0` activa y gestionada por `wpa_supplicant` + NetworkManager en cada arranque. |
+| **Botón Power y Suspensión**| `tablet_power_daemon.py` + `libphosh_backlight_shim.so` | ✅ **100% Funcional** | Suspensión real `s2idle` (`/sys/power/state = mem`) con apagado de `DSI-1`/Wi-Fi/BT, brillo completo `[10, 255]` con slider nativo en Phosh, `reboot -f`/`poweroff -f` y wake inmediato por `KEY_POWER`. |
+| **Audio** | ALSA MT6789 AFE + 4x AW87359 | ✅ **100% Funcional** | Sonido nítido en 4 altavoces, detección Jack 3.5mm, volumen sincronizado 1:1 vía `pactl` (escala cúbica PulseAudio/Phosh) y control físico con OSD. |
+| **Batería** | PMIC MT6366 + MT6375 chg | ✅ **100% Funcional** | Carga rápida a 2A, curva OCV 7500mAh con compensación IR ($R_{int}=85\text{ m}\Omega$), `is_full_hw` validado (`>= 4320 mV`) y servicio `upower_battery_provider.py` en Phosh. |
+| **Pantalla, Rotación y Touch** | MIPI-DSI 1200x1920 + TDDI + `gpu_interface_driver.c` | ✅ **100% Funcional** | Sesión GNOME/Phosh en español (`es_EC.UTF-8`), rotación vertical (`180°`) y horizontal (`90°`) con mapeo afín 2D sin distorsión, `tddi_9551_patched.ko` y `gsd-rfkill` para Bluetooth UI. |
+| **Wi-Fi, BT y Reloj NTP** | MediaTek MT6631 / WMT + `chronyd` | ✅ **100% Funcional** | `wlan0` (NetworkManager), Bluetooth (`tablet_bt_daemon.py` + `gsd-rfkill`) y sincronización automática de hora por NTP (`chronyd`) con respaldo `/var/lib/last_valid_time`. |
 | **Kernel / Boot**| Boot v4 + musb Gadget + WDT | ✅ **100% Funcional** | Kernel 5.10.185-pmos estable con `wdt_pet` (sin reinicios watchdog), red fija `172.16.42.1`. |
 | **Aceleración GPU**| ARM Mali-G57 MC2 + `libgpu_interface_driver.so` | ✅ **100% Funcional** | Compositor Phoc (`WLR_RENDERER=gles2`) y apps GTK4 (`GSK_RENDERER=gl`) acelerados por hardware a 60 FPS (812 MHz OPP 15 en uso, SIMD ARM NEON x8). |
 

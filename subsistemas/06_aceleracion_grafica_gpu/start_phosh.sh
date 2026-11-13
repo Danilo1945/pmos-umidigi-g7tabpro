@@ -182,6 +182,9 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export NO_AT_BRIDGE=1
+export LANG=es_EC.UTF-8
+export LC_ALL=es_EC.UTF-8
+export LANGUAGE=es_EC:es
 
 # Aceleración GPU Mali nativa para clientes GTK / GNOME Mobile
 export GSK_RENDERER=gl
@@ -216,12 +219,20 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Iniciar teclado en pantalla squeekboard dentro de la sesion Wayland activa
+# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill
+dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND HOME LANG LC_ALL LANGUAGE 2>/dev/null || true
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi
+chmod 666 /dev/rfkill 2>/dev/null || true
+if [ -x /usr/libexec/gsd-rfkill ] && ! pgrep -x gsd-rfkill >/dev/null 2>&1; then
+    /usr/libexec/gsd-rfkill >/var/log/gsd-rfkill.log 2>&1 &
+fi
 
 echo "[wrapper] Lanzando sesion GNOME Mobile Phosh con aceleracion GPU completa..." >> /var/log/phosh_user.log
+if [ -f /usr/lib/libphosh_backlight_shim.so ]; then
+    exec env LD_PRELOAD=/usr/lib/libphosh_backlight_shim.so /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
+fi
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
 WRAPPEREOF
 chmod 755 "$WRAPPER_TARGET"
@@ -353,6 +364,33 @@ elif [ -f /usr/local/bin/tablet_audio_daemon.py ] && ! pgrep -f tablet_audio_dae
     python3 -u /usr/local/bin/tablet_audio_daemon.py > /var/log/tablet_audio.log 2>&1 &
 fi
 
+# 12.1 Subsistema 04: Bluetooth MediaTek ConnSys (hci0 + BlueZ)
+if [ -f /usr/bin/tablet_bt_daemon.py ] && ! pgrep -f tablet_bt_daemon.py >/dev/null 2>&1; then
+    python3 -u /usr/bin/tablet_bt_daemon.py > /var/log/tablet_bt.log 2>&1 &
+fi
+
+# 12.2 Sincronización de reloj (última hora válida + chronyd NTP cuando haya red)
+if [ "$(date +%s)" -lt 1700000000 ] && [ -f /var/lib/last_valid_time ]; then
+    SAVED_TS=$(cat /var/lib/last_valid_time 2>/dev/null)
+    if [ -n "$SAVED_TS" ] && [ "$SAVED_TS" -gt 1700000000 ] 2>/dev/null; then
+        date -s "@$SAVED_TS" >/dev/null 2>&1 || true
+    fi
+fi
+if [ -x /usr/sbin/chronyd ] && ! pgrep -f "chrony_wait_sync" >/dev/null 2>&1; then
+    (
+        # chrony_wait_sync: esperar conectividad antes de resolver pool.ntp.org
+        for _i in $(seq 1 60); do
+            if ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; then
+                pkill -x chronyd >/dev/null 2>&1 || true
+                sleep 0.2
+                /usr/sbin/chronyd -f /etc/chrony/chrony.conf >/dev/null 2>&1 || true
+                break
+            fi
+            sleep 2
+        done
+    ) >/dev/null 2>&1 &
+fi
+
 # 13. Subsistema 03: Botón Físico Power, Suspensión D-Bus login1, Brillo y Volumen
 HOME=/root dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 if [ -f /usr/bin/tablet_power_daemon.py ] && ! pgrep -f tablet_power_daemon.py >/dev/null 2>&1; then
@@ -381,6 +419,9 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME:Phosh
 export XDG_SESSION_DESKTOP=phosh
 export MOZ_ENABLE_WAYLAND=1
+export LANG=es_EC.UTF-8
+export LC_ALL=es_EC.UTF-8
+export LANGUAGE=es_EC:es
 
 PHOC_PRELOAD="/usr/lib/libjemalloc.so.2 /usr/lib/libseat_direct.so /usr/lib/libgpu_interface_driver.so"
 unset LD_PRELOAD
