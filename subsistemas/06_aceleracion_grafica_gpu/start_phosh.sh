@@ -10,6 +10,12 @@
 mkdir -p /var/log /sysroot/var/log 2>/dev/null || true
 killall -9 drm_splash panel_pwm_force feedbackd callaudiod dconf-service at-spi-bus-launcher at-spi2-registryd backlight_lock backlight_guard 2>/dev/null || true
 pkill -f "capture_touch" 2>/dev/null || true
+# Detener cualquier bucle residual de /init (ej. sync_debug_to_misc o telnetd busy-loop)
+for _pid in $(ps -o pid,ppid,comm | awk '$2 == 1 && $3 == "init" && $1 != 1 {print $1}'); do
+    if ! ps -o ppid,comm | awk -v p="$_pid" '$1 == p && ($2 ~ /tcpsvd|getty|sh|unudhcpd/) {found=1} END {exit !found}'; then
+        kill -9 "$_pid" 2>/dev/null || true
+    fi
+done
 
 # Inhabilitar feedbackd permanentemente para evitar cuelgues de D-Bus en eventos táctiles
 chmod 000 /usr/libexec/feedbackd /sysroot/usr/libexec/feedbackd 2>/dev/null || true
@@ -44,6 +50,7 @@ chmod 666 /dev/mali0 /sysroot/dev/mali0 /dev/dma_heap/* /sysroot/dev/dma_heap/* 
 
 # Configuración de alto rendimiento para GPU Mali-G57 (812 MHz - 1.1 GHz / OPP 15)
 if [ -d /proc/gpufreqv2 ]; then
+    echo "switch 2 0 0" > /proc/gpufreqv2/limit_table 2>/dev/null || true
     echo 15 > /proc/gpufreqv2/fix_target_opp_index 2>/dev/null || true
 fi
 for mg in /sys/class/devfreq/*.mali/governor; do
@@ -52,6 +59,7 @@ done
 for mf in /sys/class/devfreq/*.mali/min_freq; do
     [ -f "$mf" ] && echo 812000000 > "$mf" 2>/dev/null || true
 done
+echo 1024 > /proc/sys/kernel/sched_util_clamp_min 2>/dev/null || true
 
 # 3.2 Cargar driver táctil Chipone TDDI parcheado
 if [ ! -e /dev/input/event2 ]; then
@@ -94,13 +102,17 @@ done
 chmod 755 /dev/snd /sysroot/dev/snd 2>/dev/null || true
 chmod 666 /dev/snd/* /sysroot/dev/snd/* 2>/dev/null || true
 
-# 4. Montaje de /dev/shm tmpfs (128M) (Requerido por Wayland/wlroots xkb keymaps)
+# 4. Montaje de /dev/shm tmpfs (512M) (Requerido por Wayland/wlroots y buffers de video wl_shm de Firefox)
 mkdir -p /dev/shm /sysroot/dev/shm 2>/dev/null || true
 if ! grep -q ' /dev/shm ' /proc/mounts 2>/dev/null; then
-    mount -t tmpfs -o mode=1777,size=128M shm /dev/shm 2>/dev/null || true
+    mount -t tmpfs -o mode=1777,size=512M shm /dev/shm 2>/dev/null || true
+else
+    mount -o remount,size=512M /dev/shm 2>/dev/null || true
 fi
 if [ -d /sysroot/dev/shm ] && ! grep -q ' /sysroot/dev/shm ' /proc/mounts 2>/dev/null; then
-    mount -t tmpfs -o mode=1777,size=128M shm /sysroot/dev/shm 2>/dev/null || true
+    mount -t tmpfs -o mode=1777,size=512M shm /sysroot/dev/shm 2>/dev/null || true
+else
+    mount -o remount,size=512M /sysroot/dev/shm 2>/dev/null || true
 fi
 chmod 1777 /dev/shm /sysroot/dev/shm 2>/dev/null || true
 
@@ -219,8 +231,13 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill
+# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill + wireplumber
 dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND HOME LANG LC_ALL LANGUAGE 2>/dev/null || true
+if [ -x /usr/bin/wireplumber ]; then
+    pkill -x wireplumber 2>/dev/null || true
+    sleep 0.1
+    /usr/bin/wireplumber >/var/log/wireplumber.log 2>&1 &
+fi
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi
@@ -400,6 +417,44 @@ if [ -f /usr/bin/tablet_power_daemon.py ] && ! pgrep -f tablet_power_daemon.py >
             break
         fi
         sleep 0.1
+    done
+fi
+
+# 13.1 Optimización de Firefox (Wayland, jemalloc, H.264 NEON y desactivación de #cinematics YouTube)
+if [ -f /usr/lib/firefox/firefox-real ]; then
+    cat << 'FFEOF' > /usr/lib/firefox/firefox
+#!/bin/sh
+export LD_PRELOAD=/usr/lib/libjemalloc.so.2
+export HOME=/root
+export USER=root
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export WAYLAND_DISPLAY=wayland-0
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland
+export PULSE_LATENCY_MSEC=60
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -n "$(pidof phosh)" ]; then
+    export DBUS_SESSION_BUS_ADDRESS=$(tr '\0' '\n' < /proc/$(pidof phosh | awk '{print $1}')/environ 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)
+fi
+exec /usr/lib/firefox/firefox-real "$@"
+FFEOF
+    chmod 755 /usr/lib/firefox/firefox 2>/dev/null || true
+    for pdir in /root/.config/mozilla/firefox/*.default*; do
+        [ -d "$pdir" ] || continue
+        mkdir -p "$pdir/chrome" 2>/dev/null || true
+        cat << 'CSSEOF' > "$pdir/chrome/userContent.css"
+@-moz-document domain("youtube.com") {
+    #cinematics, ytd-watch-flexy #cinematics, #cinematics-container, .ytp-webgl-spherical-control {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    ytd-masthead, #background.ytd-masthead, tp-yt-app-header, .ytp-chrome-bottom, .ytp-settings-menu {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+}
+CSSEOF
     done
 fi
 

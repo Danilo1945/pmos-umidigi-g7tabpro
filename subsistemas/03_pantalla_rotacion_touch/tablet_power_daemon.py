@@ -173,33 +173,49 @@ def set_cpu_and_gpu_power(active=True):
             except Exception:
                 pass
 
-        # 2. Gobernador dinámico inteligente schedutil (estilo Android / EAS)
+        # 2. Gobernador dinámico inteligente schedutil con impulso de capacidad uclamp para fluidez instantánea
+        # 2. Gobernador performance en ambos clusters (2.0 GHz A55 / 2.2 GHz A76) mientras la pantalla está activa
         for g in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
             try:
                 with open(g, "w") as f:
-                    f.write("schedutil\n")
+                    f.write("performance\n")
             except Exception:
                 pass
-
-        # 3. Escalado dinámico de GPU ARM Mali-G57 MC2 (simple_ondemand, 390 MHz a 812 MHz)
         try:
+            if os.path.exists("/proc/sys/kernel/sched_util_clamp_min"):
+                with open("/proc/sys/kernel/sched_util_clamp_min", "w") as f:
+                    f.write("1024\n")
+        except Exception:
+            pass
+
+        # 3. Escalado de alto rendimiento de GPU ARM Mali-G57 MC2 (desbloquear THERMAL_AP falso y fijar OPP 15 = 812 MHz)
+        try:
+            if os.path.exists("/proc/gpufreqv2/limit_table"):
+                with open("/proc/gpufreqv2/limit_table", "w") as f:
+                    f.write("switch 2 0 0\n")  # Desactivar falso techo THERMAL_AP (OPP 37) cuando las zonas térmicas no están pobladas
             if os.path.exists("/proc/gpufreqv2/fix_target_opp_index"):
                 with open("/proc/gpufreqv2/fix_target_opp_index", "w") as f:
-                    f.write("-1\n")  # Liberar frecuencia fija
+                    f.write("15\n")  # Fijar OPP 15 (812 MHz) mientras la pantalla está activa
             for mf in glob.glob("/sys/class/devfreq/*mali/max_freq"):
                 with open(mf, "w") as f:
                     f.write("812000000\n")
             for mf in glob.glob("/sys/class/devfreq/*mali/min_freq"):
                 with open(mf, "w") as f:
-                    f.write("390000000\n")
+                    f.write("812000000\n")
             for mg in glob.glob("/sys/class/devfreq/*mali/governor"):
                 with open(mg, "w") as f:
-                    f.write("simple_ondemand\n")
+                    f.write("performance\n")
         except Exception:
             pass
     else:
         # Reposo / Deep Standby:
-        # 1. CPU0 al mínimo (powersave a 500 MHz)
+        # 1. CPU0 al mínimo (powersave a 500 MHz) y uclamp_min en 0
+        try:
+            if os.path.exists("/proc/sys/kernel/sched_util_clamp_min"):
+                with open("/proc/sys/kernel/sched_util_clamp_min", "w") as f:
+                    f.write("0\n")
+        except Exception:
+            pass
         g0 = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
         try:
             if os.path.exists(g0):
@@ -273,11 +289,13 @@ def lock_screen():
 saved_transform = "180"
 
 def get_current_transform():
-    """Lee la transformación actual de DSI-1 (ej. '180', '90', '270', 'normal')."""
-    wlr_bin = "/usr/bin/wlr-randr" if os.path.exists("/usr/bin/wlr-randr") else "chroot /sysroot /usr/bin/wlr-randr"
+    """Lee la transformación actual de DSI-1 (ej. '180', '90', '270', 'normal') sin fork de shell."""
     try:
-        cmd = f"WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp/runtime-root {wlr_bin} 2>/dev/null || true"
-        out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+        env = os.environ.copy()
+        env["WAYLAND_DISPLAY"] = "wayland-0"
+        env["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
+        args = ["/usr/bin/wlr-randr"] if os.path.exists("/usr/bin/wlr-randr") else ["chroot", "/sysroot", "/usr/bin/wlr-randr"]
+        out = subprocess.check_output(args, env=env, stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("Transform:"):
@@ -287,6 +305,41 @@ def get_current_transform():
     except Exception:
         pass
     return saved_transform
+
+def optimize_thread_affinities():
+    """Asigna los hilos críticos de composición (phoc) y renderizado/video (firefox) a los núcleos rápidos Cortex-A76 (CPU 6-7)."""
+    if not is_screen_on or _sleeping_in_kernel or not hasattr(os, "sched_setaffinity"):
+        return
+    try:
+        for pdir in glob.glob("/proc/[0-9]*"):
+            try:
+                with open(f"{pdir}/comm", "r") as f:
+                    pcomm = f.read().strip()
+            except Exception:
+                continue
+            pid = int(os.path.basename(pdir))
+            if pcomm == "phoc":
+                try:
+                    os.sched_setaffinity(pid, {6, 7})
+                    os.setpriority(os.PRIO_PROCESS, pid, -10)
+                except Exception:
+                    pass
+            elif pcomm in ("firefox-real", "firefox", "Isolated Web Co", "RDD Process", "Utility Process", "Web Content"):
+                for tdir in glob.glob(f"{pdir}/task/[0-9]*"):
+                    try:
+                        tid = int(os.path.basename(tdir))
+                        with open(f"{tdir}/comm", "r") as tf:
+                            tcomm = tf.read().strip()
+                        if tcomm in ("Renderer", "SwComposite", "Compositor", "WRRenderBackend#1", "WRSceneBuilder#1"):
+                            os.sched_setaffinity(tid, {6, 7})
+                            os.setpriority(os.PRIO_PROCESS, tid, -5)
+                        elif tcomm in ("Isolated Web Co", "MediaSupervisor", "RemVidChild", "ImageBridgeChld") or tcomm.startswith(("MediaPDecoder", "FFmpegVideo", "dav1d-worker")):
+                            os.sched_setaffinity(tid, {4, 5, 6, 7})
+                            os.setpriority(os.PRIO_PROCESS, tid, -4)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 def check_and_remap_rotation():
     """Mapea el botón Rotar de Phosh entre 180° (vertical derecho) y 90° (horizontal del lado del estuche)."""
@@ -967,9 +1020,10 @@ def main():
 
     while True:
         now = time.time()
-        if now - last_check_rot > 0.4:
+        if now - last_check_rot > 2.0:
             last_check_rot = now
             check_and_remap_rotation()
+            optimize_thread_affinities()
         if now > 1700000000 and (now - last_save_time > 60.0):
             last_save_time = now
             try:

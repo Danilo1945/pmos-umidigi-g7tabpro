@@ -50,8 +50,13 @@ gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
 gsettings set org.gnome.desktop.interface enable-animations true 2>/dev/null || true
 dconf write /sm/puri/phosh/enable-suspend true 2>/dev/null || true
 
-# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill
+# 4. Propagar entorno Wayland/GNOME al bus de sesion D-Bus y lanzar squeekboard + gsd-rfkill + wireplumber
 dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND HOME LANG LC_ALL LANGUAGE 2>/dev/null || true
+if [ -x /usr/bin/wireplumber ]; then
+    pkill -x wireplumber 2>/dev/null || true
+    sleep 0.1
+    /usr/bin/wireplumber >/var/log/wireplumber.log 2>&1 &
+fi
 if ! pgrep -x squeekboard >/dev/null 2>&1; then
     /usr/bin/squeekboard >/var/log/squeekboard.log 2>&1 &
 fi

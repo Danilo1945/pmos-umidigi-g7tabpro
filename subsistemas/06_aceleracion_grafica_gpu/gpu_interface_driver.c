@@ -675,11 +675,11 @@ int ioctl(int fd, int request, ...) {
             uint8_t new_vertex_atom_num = (max_atom_num < 250) ? (max_atom_num + 1) : 251;
             uint8_t new_tiler_atom_num = (max_atom_num < 250) ? (max_atom_num + 2) : 252;
 
-            kmsg_always("[gpu-driver] ATOM_CHECK: nr_atoms=%u, split_idx=%d, clast=0x%llx, vfirst=0x%llx, tfirst=0x%llx\n",
-                        sub->nr_atoms, split_atom_idx,
-                        (unsigned long long)compute_last_job,
-                        (unsigned long long)vertex_first_job,
-                        (unsigned long long)tiler_first_job);
+            GPU_LOG("[gpu-driver] ATOM_CHECK: nr_atoms=%u, split_idx=%d, clast=0x%llx, vfirst=0x%llx, tfirst=0x%llx",
+                    sub->nr_atoms, split_atom_idx,
+                    (unsigned long long)compute_last_job,
+                    (unsigned long long)vertex_first_job,
+                    (unsigned long long)tiler_first_job);
 
             if (split_atom_idx >= 0 && compute_last_job != 0 && vertex_first_job != 0 && tiler_first_job != 0) {
                 // 1. Terminar la cadena Compute en compute_last_job (JC->next = 0)
@@ -2044,8 +2044,6 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
 
 __attribute__((visibility("default")))
 void glPixelStorei(GLenum pname, GLint param) {
-    static void (*real_fn)(GLenum, GLint) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glPixelStorei");
     if (pname == 0x0CF2 /* GL_UNPACK_ROW_LENGTH_EXT */) {
         g_unpack_row_length = param;
     } else if (pname == 0x0CF3 /* GL_UNPACK_SKIP_ROWS_EXT */) {
@@ -2053,7 +2051,6 @@ void glPixelStorei(GLenum pname, GLint param) {
     } else if (pname == 0x0CF4 /* GL_UNPACK_SKIP_PIXELS_EXT */) {
         g_unpack_skip_pixels = param;
     }
-    if (real_fn) real_fn(pname, param);
 }
 
 static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int yoffset,
@@ -2066,24 +2063,48 @@ static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int
     const uint32_t *src32 = (const uint32_t *)pixels + (size_t)skip_rows * src_stride_px + skip_pixels;
     /* GL_BGRA_EXT = 0x80E1, GL_RGBA = 0x1908, GL_RGB = 0x1907 */
     int is_rgba = (format == 0x1908);
+    int is_full_update = (xoffset <= 0 && yoffset <= 0 && width >= st->width && height >= st->height);
 
     if (!is_rgba) {
-        /* Para formatos compatibles con ARGB/BGRA nativo: copia directa línea a línea vía memcpy */
+        /* Para formatos compatibles con ARGB/BGRA nativo: copia NEON + detección de canal alfa */
         int copy_w = width;
         if (xoffset + copy_w > st->width) copy_w = st->width - xoffset;
         if (copy_w <= 0) return;
-        size_t line_bytes = (size_t)copy_w * sizeof(uint32_t);
+
+        uint32x4_t v_and_all = vdupq_n_u32(0xFFFFFFFFu);
+        uint32_t scalar_and = 0xFFFFFFFFu;
 
         for (int y = 0; y < height; y++) {
             int dy = yoffset + y;
             if (dy < 0 || dy >= st->height) continue;
             uint32_t *dst_row = st->pixels + dy * st->width + xoffset;
             const uint32_t *src_row = src32 + y * src_stride_px;
-            memcpy(dst_row, src_row, line_bytes);
+            int x = 0;
+            for (; x <= copy_w - 8; x += 8) {
+                uint32x4_t v0 = vld1q_u32(src_row + x);
+                uint32x4_t v1 = vld1q_u32(src_row + x + 4);
+                v_and_all = vandq_u32(v_and_all, vandq_u32(v0, v1));
+                vst1q_u32(dst_row + x, v0);
+                vst1q_u32(dst_row + x + 4, v1);
+            }
+            for (; x < copy_w; x++) {
+                uint32_t px = src_row[x];
+                scalar_and &= px;
+                dst_row[x] = px;
+            }
+        }
+        uint32x2_t v_low = vand_u32(vget_low_u32(v_and_all), vget_high_u32(v_and_all));
+        uint32_t combined_and = vget_lane_u32(v_low, 0) & vget_lane_u32(v_low, 1) & scalar_and;
+        int region_has_alpha = ((combined_and & 0xFF000000u) != 0xFF000000u);
+        if (is_full_update) {
+            st->has_alpha = region_has_alpha;
+        } else if (region_has_alpha) {
+            st->has_alpha = 1;
         }
         return;
     }
 
+    uint32_t scalar_and = 0xFFFFFFFFu;
     for (int y = 0; y < height; y++) {
         int dy = yoffset + y;
         if (dy < 0 || dy >= st->height) continue;
@@ -2093,6 +2114,7 @@ static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int
             int dx = xoffset + x;
             if (dx < 0 || dx >= st->width) continue;
             uint32_t px = src_row[x];
+            scalar_and &= px;
             /* Convertir 0xAABBGGRR -> 0xAARRGGBB */
             uint32_t a = px & 0xFF000000u;
             uint32_t r = (px & 0x000000FFu) << 16;
@@ -2100,6 +2122,12 @@ static void convert_and_store_tex_region(struct shadow_tex *st, int xoffset, int
             uint32_t b = (px & 0x00FF0000u) >> 16;
             dst_row[dx] = a | r | g | b;
         }
+    }
+    int region_has_alpha = ((scalar_and & 0xFF000000u) != 0xFF000000u);
+    if (is_full_update) {
+        st->has_alpha = region_has_alpha;
+    } else if (region_has_alpha) {
+        st->has_alpha = 1;
     }
 }
 
@@ -2266,36 +2294,24 @@ void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
 
 __attribute__((visibility("default")))
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glViewport");
     g_vp_x = x; g_vp_y = y; g_vp_w = width; g_vp_h = height;
-    if (real_fn) real_fn(x, y, width, height);
 }
 
 __attribute__((visibility("default")))
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
-    static void (*real_fn)(GLint, GLint, GLsizei, GLsizei) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glScissor");
     g_sc_x = x; g_sc_y = y; g_sc_w = width; g_sc_h = height;
-    if (real_fn) real_fn(x, y, width, height);
 }
 
 __attribute__((visibility("default")))
 void glEnable(GLenum cap) {
-    static void (*real_fn)(GLenum) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glEnable");
     if (cap == 0x0C11 /* GL_SCISSOR_TEST */) g_scissor_enabled = 1;
     else if (cap == 0x0BE2 /* GL_BLEND */) g_blend_enabled = 1;
-    if (real_fn) real_fn(cap);
 }
 
 __attribute__((visibility("default")))
 void glDisable(GLenum cap) {
-    static void (*real_fn)(GLenum) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glDisable");
     if (cap == 0x0C11 /* GL_SCISSOR_TEST */) g_scissor_enabled = 0;
     else if (cap == 0x0BE2 /* GL_BLEND */) g_blend_enabled = 0;
-    if (real_fn) real_fn(cap);
 }
 
 static GLuint g_last_fs_type = 0;
@@ -2346,73 +2362,48 @@ GLint glGetUniformLocation(GLuint program, const char *name) {
 
 __attribute__((visibility("default")))
 void glUseProgram(GLuint program) {
-    static void (*real_fn)(GLuint) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glUseProgram");
     if (program < MAX_SHADOW_Programs) g_current_prog = program;
-    if (real_fn) real_fn(program);
 }
 
 __attribute__((visibility("default")))
 void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    static void (*real_fn)(GLint, GLsizei, GLboolean, const GLfloat *) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glUniformMatrix3fv");
+    (void)count;
+    (void)transpose;
     if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs && value) {
         struct shadow_prog *sp = &g_progs[g_current_prog];
-        float m[9];
-        if (transpose) {
-            /* Si transpose=GL_TRUE, value ya está en orden por filas; si GL_FALSE, value es column-major */
-            memcpy(m, value, 9 * sizeof(float));
-        } else {
-            /* En GLES2 transpose siempre es GL_FALSE: column-major en memoria.
-             * En el shader de wlroots: vec3(x,y,1) * mat3 -> multiplica vector fila por columnas de mat3!
-             * Específicamente: (v * M).x = dot(v, col0) = x*v[0] + y*v[1] + 1*v[2]
-             *                  (v * M).y = dot(v, col1) = x*v[3] + y*v[4] + 1*v[5] */
-            memcpy(m, value, 9 * sizeof(float));
-        }
-        if (location == sp->loc_proj) memcpy(sp->proj, m, sizeof(m));
-        else if (location == sp->loc_tex_proj) memcpy(sp->tex_proj, m, sizeof(m));
+        if (location == sp->loc_proj) memcpy(sp->proj, value, 9 * sizeof(float));
+        else if (location == sp->loc_tex_proj) memcpy(sp->tex_proj, value, 9 * sizeof(float));
     }
-    if (real_fn) real_fn(location, count, transpose, value);
 }
 
 __attribute__((visibility("default")))
 void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
-    static void (*real_fn)(GLint, GLfloat, GLfloat, GLfloat, GLfloat) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glUniform4f");
     if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs) {
         struct shadow_prog *sp = &g_progs[g_current_prog];
         if (location == sp->loc_color) {
             sp->color[0] = v0; sp->color[1] = v1; sp->color[2] = v2; sp->color[3] = v3;
         }
     }
-    if (real_fn) real_fn(location, v0, v1, v2, v3);
 }
 
 __attribute__((visibility("default")))
 void glUniform1f(GLint location, GLfloat v0) {
-    static void (*real_fn)(GLint, GLfloat) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glUniform1f");
     if (g_current_prog > 0 && g_current_prog < MAX_SHADOW_Programs) {
         struct shadow_prog *sp = &g_progs[g_current_prog];
         if (location == sp->loc_alpha) sp->alpha = v0;
     }
-    if (real_fn) real_fn(location, v0);
 }
 
 __attribute__((visibility("default")))
 void glBindBuffer(GLenum target, GLuint buffer) {
-    static void (*real_fn)(GLenum, GLuint) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glBindBuffer");
     if (target == 0x8892 /* GL_ARRAY_BUFFER */) {
         g_bound_vbo = buffer;
     }
-    if (real_fn) real_fn(target, buffer);
 }
 
 __attribute__((visibility("default")))
 void glBufferData(GLenum target, ptrdiff_t size, const void *data, GLenum usage) {
-    static void (*real_fn)(GLenum, ptrdiff_t, const void *, GLenum) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glBufferData");
+    (void)usage;
     if (target == 0x8892 /* GL_ARRAY_BUFFER */ && g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS && size > 0) {
         if (g_shadow_vbo[g_bound_vbo].size < (size_t)size) {
             free(g_shadow_vbo[g_bound_vbo].data);
@@ -2423,27 +2414,22 @@ void glBufferData(GLenum target, ptrdiff_t size, const void *data, GLenum usage)
             memcpy(g_shadow_vbo[g_bound_vbo].data, data, (size_t)size);
         }
     }
-    if (real_fn) real_fn(target, size, data, usage);
 }
 
 __attribute__((visibility("default")))
 void glBufferSubData(GLenum target, ptrdiff_t offset, ptrdiff_t size, const void *data) {
-    static void (*real_fn)(GLenum, ptrdiff_t, ptrdiff_t, const void *) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glBufferSubData");
     if (target == 0x8892 /* GL_ARRAY_BUFFER */ && g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS &&
         data && offset >= 0 && size > 0 && (size_t)(offset + size) <= g_shadow_vbo[g_bound_vbo].size &&
         g_shadow_vbo[g_bound_vbo].data) {
         memcpy(g_shadow_vbo[g_bound_vbo].data + offset, data, (size_t)size);
     }
-    if (real_fn) real_fn(target, offset, size, data);
 }
 
 __attribute__((visibility("default")))
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
                            GLsizei stride, const void *pointer)
 {
-    static void (*real_fn)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *) = NULL;
-    if (!real_fn) real_fn = resolve_mali_gl("glVertexAttribPointer");
+    (void)normalized;
     if (index == 0 && size == 2 && type == 0x1406 /* GL_FLOAT */) {
         if (g_bound_vbo > 0 && g_bound_vbo < MAX_SHADOW_VBOS && g_shadow_vbo[g_bound_vbo].data) {
             uintptr_t off = (uintptr_t)pointer;
@@ -2460,7 +2446,31 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
         g_attrib0_size = size;
         g_attrib0_stride = stride;
     }
-    if (real_fn) real_fn(index, size, type, normalized, stride, pointer);
+}
+
+/* Backbuffer sombra en RAM cacheable (L1/L2/L3) para eliminar lecturas de memoria KMS no-cacheable (MT_NORMAL_NC) */
+static uint32_t *g_shadow_fb = NULL;
+static int g_shadow_fb_w = 0;
+static int g_shadow_fb_h = 0;
+static int g_shadow_fb_stride_px = 0;
+
+static inline uint32_t *get_shadow_fb(struct dumb_bo_entry *d) {
+    if (!d || d->width == 0 || d->height == 0 || d->stride == 0) return NULL;
+    int w = (int)d->width;
+    int h = (int)d->height;
+    int s = (int)(d->stride / 4);
+    if (!g_shadow_fb || g_shadow_fb_w != w || g_shadow_fb_h != h || g_shadow_fb_stride_px != s) {
+        free(g_shadow_fb);
+        size_t bytes = ((size_t)s * (size_t)h * sizeof(uint32_t) + 63u) & ~63u;
+        g_shadow_fb = (uint32_t *)aligned_alloc(64, bytes);
+        if (g_shadow_fb) {
+            memset(g_shadow_fb, 0, bytes);
+            g_shadow_fb_w = w;
+            g_shadow_fb_h = h;
+            g_shadow_fb_stride_px = s;
+        }
+    }
+    return g_shadow_fb;
 }
 
 __attribute__((visibility("default")))
@@ -2476,7 +2486,8 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
     struct dumb_bo_entry *d = get_active_fbo_dumb();
     if (d && d->cpu_map && pixels && width > 0 && height > 0) {
         int stride_px = (int)(d->stride / 4);
-        const uint32_t *src_base = (const uint32_t *)d->cpu_map;
+        const uint32_t *sh_px = get_shadow_fb(d);
+        const uint32_t *src_base = sh_px ? sh_px : (const uint32_t *)d->cpu_map;
         if (format == 0x1907 /* GL_RGB */) {
             uint8_t *dst8 = (uint8_t *)pixels;
             for (int row = 0; row < height; row++) {
@@ -2567,9 +2578,39 @@ static inline uint32_t blend_premult_argb(uint32_t src, uint32_t dst) {
     return 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
 }
 
-/* Rutina NEON ultra-rápida de mezcla premultiplicada para 4 píxeles ARGB a la vez */
-static inline void blend_row_neon(uint32_t *dst, const uint32_t *src, int count) {
+/* Copia lineal hacia adelante NEON (de scaled_row en L1 a shadow_dst + kms_dst) */
+static inline void copy_row_neon_fwd(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src, int count) {
+    static const uint8_t s_alpha_mask[16] = {
+        0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF
+    };
+    uint8x16_t v_amask = vld1q_u8(s_alpha_mask);
     int i = 0;
+    for (; i <= count - 8; i += 8) {
+        uint8x16_t v0 = vorrq_u8(vld1q_u8((const uint8_t *)(src + i)), v_amask);
+        uint8x16_t v1 = vorrq_u8(vld1q_u8((const uint8_t *)(src + i + 4)), v_amask);
+        if (sh_dst) {
+            vst1q_u8((uint8_t *)(sh_dst + i), v0);
+            vst1q_u8((uint8_t *)(sh_dst + i + 4), v1);
+        }
+        vst1q_u8((uint8_t *)(kms_dst + i), v0);
+        vst1q_u8((uint8_t *)(kms_dst + i + 4), v1);
+    }
+    for (; i <= count - 4; i += 4) {
+        uint8x16_t v0 = vorrq_u8(vld1q_u8((const uint8_t *)(src + i)), v_amask);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), v0);
+        vst1q_u8((uint8_t *)(kms_dst + i), v0);
+    }
+    for (; i < count; i++) {
+        uint32_t px = src[i] | 0xFF000000u;
+        if (sh_dst) sh_dst[i] = px;
+        kms_dst[i] = px;
+    }
+}
+
+/* Rutina NEON ultra-rápida de mezcla premultiplicada (lee de RAM cacheable sh_dst, escribe a sh_dst + kms_dst) */
+static inline void blend_row_neon(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src, int count) {
+    int i = 0;
+    uint32_t *read_dst = sh_dst ? sh_dst : kms_dst;
     static const uint8_t s_dup_alpha_idx[16] = {
         3, 3, 3, 3,
         7, 7, 7, 7,
@@ -2588,8 +2629,19 @@ static inline void blend_row_neon(uint32_t *dst, const uint32_t *src, int count)
 
     for (; i <= count - 4; i += 4) {
         uint8x16_t vsrc = vld1q_u8((const uint8_t *)(src + i));
-        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint64x2_t vsrc64 = vreinterpretq_u64_u8(vsrc);
+        uint64_t a_and = vgetq_lane_u64(vsrc64, 0) & vgetq_lane_u64(vsrc64, 1);
+        if ((a_and & 0xFF000000FF000000ULL) == 0xFF000000FF000000ULL) {
+            if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), vsrc);
+            vst1q_u8((uint8_t *)(kms_dst + i), vsrc);
+            continue;
+        }
+        uint64_t a_or = vgetq_lane_u64(vsrc64, 0) | vgetq_lane_u64(vsrc64, 1);
+        if ((a_or & 0xFF000000FF000000ULL) == 0ULL) {
+            continue;
+        }
 
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(read_dst + i));
         uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
         uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
 
@@ -2603,16 +2655,20 @@ static inline void blend_row_neon(uint32_t *dst, const uint32_t *src, int count)
         uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
         res = vorrq_u8(res, v_amask);
 
-        vst1q_u8((uint8_t *)(dst + i), res);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), res);
+        vst1q_u8((uint8_t *)(kms_dst + i), res);
     }
     for (; i < count; i++) {
-        dst[i] = blend_premult_argb(src[i], dst[i]);
+        uint32_t res = blend_premult_argb(src[i], read_dst[i]);
+        if (sh_dst) sh_dst[i] = res;
+        kms_dst[i] = res;
     }
 }
 
 /* Rutina NEON de mezcla con escalado global de opacidad (alpha_scale) */
-static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int count, uint32_t alpha_scale) {
+static inline void blend_row_neon_alpha(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src, int count, uint32_t alpha_scale) {
     int i = 0;
+    uint32_t *read_dst = sh_dst ? sh_dst : kms_dst;
     static const uint8_t s_dup_alpha_idx[16] = {
         3, 3, 3, 3,
         7, 7, 7, 7,
@@ -2636,7 +2692,7 @@ static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int 
         uint16x8_t s_hi = vmull_u8(vget_high_u8(vsrc_raw), v_ascale);
         uint8x16_t vsrc = vcombine_u8(vshrn_n_u16(s_lo, 8), vshrn_n_u16(s_hi, 8));
 
-        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(read_dst + i));
         uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
         uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
 
@@ -2650,7 +2706,8 @@ static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int 
         uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
         res = vorrq_u8(res, v_amask);
 
-        vst1q_u8((uint8_t *)(dst + i), res);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), res);
+        vst1q_u8((uint8_t *)(kms_dst + i), res);
     }
     for (; i < count; i++) {
         uint32_t spx = src[i];
@@ -2659,12 +2716,14 @@ static inline void blend_row_neon_alpha(uint32_t *dst, const uint32_t *src, int 
         uint32_t sg = (((spx >> 8) & 0xFFu) * alpha_scale) >> 8;
         uint32_t sb = ((spx & 0xFFu) * alpha_scale) >> 8;
         spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
-        dst[i] = blend_premult_argb(spx, dst[i]);
+        uint32_t res = blend_premult_argb(spx, read_dst[i]);
+        if (sh_dst) sh_dst[i] = res;
+        kms_dst[i] = res;
     }
 }
 
-/* Rutina NEON para copia invertida en X a 4 píxeles por ciclo */
-static inline void copy_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int count) {
+/* Rutina NEON para copia invertida en X a 8 píxeles por ciclo (escribe a sh_dst + kms_dst) */
+static inline void copy_row_neon_rev(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src_end, int count) {
     static const uint8_t s_rev_table[16] = {
         12, 13, 14, 15,
          8,  9, 10, 11,
@@ -2688,23 +2747,30 @@ static inline void copy_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int
         uint8x16_t v1 = vld1q_u8((const uint8_t *)s1);
         uint8x16_t r0 = vorrq_u8(vqtbl1q_u8(v0, rev_mask), v_amask);
         uint8x16_t r1 = vorrq_u8(vqtbl1q_u8(v1, rev_mask), v_amask);
-        vst1q_u8((uint8_t *)(dst + i), r0);
-        vst1q_u8((uint8_t *)(dst + i + 4), r1);
+        if (sh_dst) {
+            vst1q_u8((uint8_t *)(sh_dst + i), r0);
+            vst1q_u8((uint8_t *)(sh_dst + i + 4), r1);
+        }
+        vst1q_u8((uint8_t *)(kms_dst + i), r0);
+        vst1q_u8((uint8_t *)(kms_dst + i + 4), r1);
     }
     for (; i <= count - 4; i += 4) {
         const uint32_t *s = src_end - (i + 4);
         uint8x16_t v = vld1q_u8((const uint8_t *)s);
-        uint8x16_t r = vqtbl1q_u8(v, rev_mask);
-        r = vorrq_u8(r, v_amask);
-        vst1q_u8((uint8_t *)(dst + i), r);
+        uint8x16_t r = vorrq_u8(vqtbl1q_u8(v, rev_mask), v_amask);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), r);
+        vst1q_u8((uint8_t *)(kms_dst + i), r);
     }
     for (; i < count; i++) {
-        dst[i] = *(src_end - 1 - i) | 0xFF000000u;
+        uint32_t px = *(src_end - 1 - i) | 0xFF000000u;
+        if (sh_dst) sh_dst[i] = px;
+        kms_dst[i] = px;
     }
 }
 
-/* Rutina NEON para mezcla premultiplicada invertida en X a 8 píxeles por ciclo */
-static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, int count) {
+/* Rutina NEON para mezcla premultiplicada invertida en X a 8 píxeles por ciclo (lee de sh_dst cacheable) */
+static inline void blend_row_neon_rev(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src_end, int count) {
+    uint32_t *read_dst = sh_dst ? sh_dst : kms_dst;
     static const uint8_t s_rev_table[16] = {
         12, 13, 14, 15,
          8,  9, 10, 11,
@@ -2734,10 +2800,30 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
         const uint32_t *s1 = src_end - (i + 8);
         uint8x16_t vraw0 = vld1q_u8((const uint8_t *)s0);
         uint8x16_t vraw1 = vld1q_u8((const uint8_t *)s1);
+
+        /* Fast-path NEON: si los 8 píxeles son 100% opacos (alpha == 0xFF), omitir lectura de destino y multiplicación */
+        uint64x2_t vand64 = vreinterpretq_u64_u8(vandq_u8(vraw0, vraw1));
+        if (((vgetq_lane_u64(vand64, 0) & vgetq_lane_u64(vand64, 1)) & 0xFF000000FF000000ULL) == 0xFF000000FF000000ULL) {
+            uint8x16_t r0 = vqtbl1q_u8(vraw0, rev_mask);
+            uint8x16_t r1 = vqtbl1q_u8(vraw1, rev_mask);
+            if (sh_dst) {
+                vst1q_u8((uint8_t *)(sh_dst + i), r0);
+                vst1q_u8((uint8_t *)(sh_dst + i + 4), r1);
+            }
+            vst1q_u8((uint8_t *)(kms_dst + i), r0);
+            vst1q_u8((uint8_t *)(kms_dst + i + 4), r1);
+            continue;
+        }
+        /* Fast-path NEON: si los 8 píxeles son 100% transparentes (alpha == 0), omitir escritura */
+        uint64x2_t vor64 = vreinterpretq_u64_u8(vorrq_u8(vraw0, vraw1));
+        if (((vgetq_lane_u64(vor64, 0) | vgetq_lane_u64(vor64, 1)) & 0xFF000000FF000000ULL) == 0ULL) {
+            continue;
+        }
+
         uint8x16_t vsrc0 = vqtbl1q_u8(vraw0, rev_mask);
         uint8x16_t vsrc1 = vqtbl1q_u8(vraw1, rev_mask);
-        uint8x16_t vdst0 = vld1q_u8((const uint8_t *)(dst + i));
-        uint8x16_t vdst1 = vld1q_u8((const uint8_t *)(dst + i + 4));
+        uint8x16_t vdst0 = vld1q_u8((const uint8_t *)(read_dst + i));
+        uint8x16_t vdst1 = vld1q_u8((const uint8_t *)(read_dst + i + 4));
 
         uint8x16_t valpha0 = vqtbl1q_u8(vsrc0, v_idx);
         uint8x16_t valpha1 = vqtbl1q_u8(vsrc1, v_idx);
@@ -2759,14 +2845,18 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
         uint8x16_t res0 = vorrq_u8(vqaddq_u8(vsrc0, scaled_dst0), v_amask);
         uint8x16_t res1 = vorrq_u8(vqaddq_u8(vsrc1, scaled_dst1), v_amask);
 
-        vst1q_u8((uint8_t *)(dst + i), res0);
-        vst1q_u8((uint8_t *)(dst + i + 4), res1);
+        if (sh_dst) {
+            vst1q_u8((uint8_t *)(sh_dst + i), res0);
+            vst1q_u8((uint8_t *)(sh_dst + i + 4), res1);
+        }
+        vst1q_u8((uint8_t *)(kms_dst + i), res0);
+        vst1q_u8((uint8_t *)(kms_dst + i + 4), res1);
     }
     for (; i <= count - 4; i += 4) {
         const uint32_t *s = src_end - (i + 4);
         uint8x16_t vraw = vld1q_u8((const uint8_t *)s);
         uint8x16_t vsrc = vqtbl1q_u8(vraw, rev_mask);
-        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(read_dst + i));
 
         uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
         uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
@@ -2779,15 +2869,19 @@ static inline void blend_row_neon_rev(uint32_t *dst, const uint32_t *src_end, in
         uint8x16_t scaled_dst = vcombine_u8(scaled_lo, scaled_hi);
 
         uint8x16_t res = vorrq_u8(vqaddq_u8(vsrc, scaled_dst), v_amask);
-        vst1q_u8((uint8_t *)(dst + i), res);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), res);
+        vst1q_u8((uint8_t *)(kms_dst + i), res);
     }
     for (; i < count; i++) {
-        dst[i] = blend_premult_argb(*(src_end - 1 - i), dst[i]);
+        uint32_t res = blend_premult_argb(*(src_end - 1 - i), read_dst[i]);
+        if (sh_dst) sh_dst[i] = res;
+        kms_dst[i] = res;
     }
 }
 
 /* Rutina NEON para mezcla premultiplicada invertida en X con modulación de opacidad */
-static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_end, int count, uint32_t alpha_scale) {
+static inline void blend_row_neon_rev_alpha(uint32_t *kms_dst, uint32_t *sh_dst, const uint32_t *src_end, int count, uint32_t alpha_scale) {
+    uint32_t *read_dst = sh_dst ? sh_dst : kms_dst;
     static const uint8_t s_rev_table[16] = {
         12, 13, 14, 15,
          8,  9, 10, 11,
@@ -2823,7 +2917,7 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
         uint16x8_t s_hi = vmull_u8(vget_high_u8(vsrc_rev), v_ascale);
         uint8x16_t vsrc = vcombine_u8(vshrn_n_u16(s_lo, 8), vshrn_n_u16(s_hi, 8));
 
-        uint8x16_t vdst = vld1q_u8((const uint8_t *)(dst + i));
+        uint8x16_t vdst = vld1q_u8((const uint8_t *)(read_dst + i));
         uint8x16_t valpha = vqtbl1q_u8(vsrc, v_idx);
         uint8x16_t vinv_a = vsubq_u8(v_255, valpha);
 
@@ -2837,7 +2931,8 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
         uint8x16_t res = vqaddq_u8(vsrc, scaled_dst);
         res = vorrq_u8(res, v_amask);
 
-        vst1q_u8((uint8_t *)(dst + i), res);
+        if (sh_dst) vst1q_u8((uint8_t *)(sh_dst + i), res);
+        vst1q_u8((uint8_t *)(kms_dst + i), res);
     }
     for (; i < count; i++) {
         uint32_t spx = *(src_end - 1 - i);
@@ -2846,7 +2941,9 @@ static inline void blend_row_neon_rev_alpha(uint32_t *dst, const uint32_t *src_e
         uint32_t sg = (((spx >> 8) & 0xFF) * alpha_scale) / 256;
         uint32_t sb = ((spx & 0xFF) * alpha_scale) / 256;
         spx = (sa << 24) | (sr << 16) | (sg << 8) | sb;
-        dst[i] = blend_premult_argb(spx, dst[i]);
+        uint32_t res = blend_premult_argb(spx, read_dst[i]);
+        if (sh_dst) sh_dst[i] = res;
+        kms_dst[i] = res;
     }
 }
 
@@ -2867,6 +2964,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int fb_h = (int)d->height;
     int fb_stride_px = (int)(d->stride / 4);
     uint32_t *fb_px = (uint32_t *)d->cpu_map;
+    uint32_t *sh_px = get_shadow_fb(d);
 
     /* Coordenadas de entrada de los 4 vértices del quad completo [0..1]x[0..1] en wlroots GLES2 */
     const float vx[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
@@ -2905,10 +3003,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (sc_y1 < clip_y1) clip_y1 = sc_y1;
     }
 
-    /* En wlroots (draw_quad_triangles), cada rectángulo de daño parcial (clip) se pasa como
-     * 6 vértices (2 triángulos GL_TRIANGLES) en g_attrib0_ptr con coordenadas normalizadas
-     * dentro del quad [0..1]x[0..1]. Respetar estos sub-rectángulos evita sobrescribir regiones
-     * fuera del área dañada (ej. PhoshHome cuando solo se actualiza la barra superior). */
     int has_subrects = (mode == 0x0004 /* GL_TRIANGLES */ && count >= 6 && (count % 6) == 0 && g_attrib0_ptr != NULL);
     int num_rects = has_subrects ? (count / 6) : 1;
     int vert_stride_floats = (g_attrib0_stride > 0) ? (int)(g_attrib0_stride / (int)sizeof(float)) : 2;
@@ -2969,11 +3063,14 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     int target_py = fb_h - 1 - py;
                     int dst_col_start = fb_w - rx1;
                     uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                    uint32_t *sh_row = sh_px ? (sh_px + target_py * fb_stride_px + dst_col_start) : NULL;
                     int x = 0;
                     for (; x <= span_w - 4; x += 4) {
+                        if (sh_row) vst1q_u32(sh_row + x, vcol);
                         vst1q_u32(dst_row + x, vcol);
                     }
                     for (; x < span_w; x++) {
+                        if (sh_row) sh_row[x] = opaque_col;
                         dst_row[x] = opaque_col;
                     }
                 }
@@ -2981,9 +3078,13 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                 for (int py = ry0; py < ry1; py++) {
                     int target_py = fb_h - 1 - py;
                     int dst_col_start = fb_w - rx1;
-                    uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+                    uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                    uint32_t *sh_row = sh_px ? (sh_px + target_py * fb_stride_px + dst_col_start) : NULL;
+                    uint32_t *read_row = sh_row ? sh_row : dst_row;
                     for (int x = 0; x < span_w; x++) {
-                        dst_row[dst_col_start + x] = blend_premult_argb(col, dst_row[dst_col_start + x]);
+                        uint32_t res = blend_premult_argb(col, read_row[x]);
+                        if (sh_row) sh_row[x] = res;
+                        dst_row[x] = res;
                     }
                 }
             }
@@ -3024,7 +3125,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
         int tw = st->width;
         int th = st->height;
-        int is_opaque_shader = (sp->is_tex == 2) || !g_blend_enabled;
+        int is_opaque_shader = (sp->is_tex == 2) || !g_blend_enabled || !st->has_alpha;
         uint32_t alpha_scale = (uint32_t)(sp->alpha * 256.0f);
         if (alpha_scale > 256u) alpha_scale = 256u;
 
@@ -3067,18 +3168,20 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                         for (int py = ry0; py < ry1; py++) {
                             int target_py = fb_h - 1 - py;
                             uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                            uint32_t *sh_row = sh_px ? (sh_px + target_py * fb_stride_px + dst_col_start) : NULL;
                             int32_t u_fp = u_row_fp;
                             int32_t v_fp = v_row_fp;
 
-                            if (is_opaque_shader && alpha_scale >= 255u) {
+                            if (du_dx_fp == 0) {
+                                /* Optimización para rotación pura 90°/270°: tx constante por fila + prefetch L1 */
+                                int tx = u_fp >> 16;
+                                if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                                const uint32_t *tex_col = tex_px + tx;
                                 for (int i = 0; i < span_w; i++) {
-                                    int tx = u_fp >> 16;
                                     int ty = v_fp >> 16;
-                                    u_fp += du_dx_fp;
                                     v_fp += dv_dx_fp;
-                                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
                                     if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
-                                    dst_row[span_w - 1 - i] = tex_px[ty * tw + tx] | 0xFF000000u;
+                                    scaled_row[span_w - 1 - i] = tex_col[ty * tw] | or_mask;
                                 }
                             } else {
                                 for (int i = 0; i < span_w; i++) {
@@ -3090,11 +3193,14 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                                     if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
                                     scaled_row[span_w - 1 - i] = tex_px[ty * tw + tx] | or_mask;
                                 }
-                                if (alpha_scale >= 255u) {
-                                    blend_row_neon(dst_row, scaled_row, span_w);
-                                } else {
-                                    blend_row_neon_alpha(dst_row, scaled_row, span_w, alpha_scale);
-                                }
+                            }
+
+                            if (is_opaque_shader && alpha_scale >= 255u) {
+                                copy_row_neon_fwd(dst_row, sh_row, scaled_row, span_w);
+                            } else if (alpha_scale >= 255u) {
+                                blend_row_neon(dst_row, sh_row, scaled_row, span_w);
+                            } else {
+                                blend_row_neon_alpha(dst_row, sh_row, scaled_row, span_w, alpha_scale);
                             }
                             u_row_fp += du_dy_fp;
                             v_row_fp += dv_dy_fp;
@@ -3139,15 +3245,16 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                 const uint32_t *src_row = st->pixels + row_rel * tw;
 
                 int target_py = fb_h - 1 - py;
-                uint32_t *dst_row = fb_px + target_py * fb_stride_px;
+                uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+                uint32_t *sh_row = sh_px ? (sh_px + target_py * fb_stride_px + dst_col_start) : NULL;
                 const uint32_t *src_end = src_row + tx_start + span_w;
 
                 if (is_opaque_shader && alpha_scale >= 255u) {
-                    copy_row_neon_rev(dst_row + dst_col_start, src_end, span_w);
+                    copy_row_neon_rev(dst_row, sh_row, src_end, span_w);
                 } else if (alpha_scale >= 255u) {
-                    blend_row_neon_rev(dst_row + dst_col_start, src_end, span_w);
+                    blend_row_neon_rev(dst_row, sh_row, src_end, span_w);
                 } else {
-                    blend_row_neon_rev_alpha(dst_row + dst_col_start, src_end, span_w, alpha_scale);
+                    blend_row_neon_rev_alpha(dst_row, sh_row, src_end, span_w, alpha_scale);
                 }
             }
             sync_scanout_rect_to_peers(d, dst_rx0, ry0, dst_rx0 + span_w, ry1);
@@ -3165,6 +3272,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (dst_col_start < 0 || dst_col_start + span_w > fb_w) continue;
 
         uint32_t scaled_row[2048];
+        uint32_t or_mask = (sp->is_tex == 2) ? 0xFF000000u : 0u;
 
         for (int py = ry0; py < ry1; py++) {
             float fy = ((float)py + 0.5f - min_sy) * inv_qh;
@@ -3175,30 +3283,23 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
             int target_py = fb_h - 1 - py;
             uint32_t *dst_row = fb_px + target_py * fb_stride_px + dst_col_start;
+            uint32_t *sh_row = sh_px ? (sh_px + target_py * fb_stride_px + dst_col_start) : NULL;
 
             float u_start_f = (u_left + ((float)rx0 + 0.5f - min_sx) * inv_qw * (u_right - u_left)) * (float)tw;
             int32_t u_curr_fp = (int32_t)(u_start_f * 65536.0f);
 
+            for (int i = 0; i < span_w; i++) {
+                int tx = u_curr_fp >> 16;
+                u_curr_fp += step_u_fp;
+                if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                scaled_row[span_w - 1 - i] = src_row[tx] | or_mask;
+            }
             if (is_opaque_shader && alpha_scale >= 255u) {
-                for (int i = 0; i < span_w; i++) {
-                    int tx = u_curr_fp >> 16;
-                    u_curr_fp += step_u_fp;
-                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
-                    dst_row[span_w - 1 - i] = src_row[tx] | 0xFF000000u;
-                }
+                copy_row_neon_fwd(dst_row, sh_row, scaled_row, span_w);
+            } else if (alpha_scale >= 255u) {
+                blend_row_neon(dst_row, sh_row, scaled_row, span_w);
             } else {
-                uint32_t or_mask = (sp->is_tex == 2) ? 0xFF000000u : 0u;
-                for (int i = 0; i < span_w; i++) {
-                    int tx = u_curr_fp >> 16;
-                    u_curr_fp += step_u_fp;
-                    if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
-                    scaled_row[span_w - 1 - i] = src_row[tx] | or_mask;
-                }
-                if (alpha_scale >= 255u) {
-                    blend_row_neon(dst_row, scaled_row, span_w);
-                } else {
-                    blend_row_neon_alpha(dst_row, scaled_row, span_w, alpha_scale);
-                }
+                blend_row_neon_alpha(dst_row, sh_row, scaled_row, span_w, alpha_scale);
             }
         }
         sync_scanout_rect_to_peers(d, rx0, ry0, rx1, ry1);
@@ -3229,6 +3330,7 @@ void glClear(unsigned int mask) {
         }
         int stride_px = (int)(d->stride / 4);
         uint32_t *fb_px = (uint32_t *)d->cpu_map;
+        uint32_t *sh_px = get_shadow_fb(d);
         int count = cx1 - cx0;
         if (count <= 0 || cy1 <= cy0) return;
 
@@ -3237,11 +3339,14 @@ void glClear(unsigned int mask) {
             int target_py = (int)d->height - 1 - py;
             int dst_col_start = (int)d->width - cx1;
             uint32_t *row = fb_px + target_py * stride_px + dst_col_start;
+            uint32_t *sh_row = sh_px ? (sh_px + target_py * stride_px + dst_col_start) : NULL;
             int x = 0;
             for (; x <= count - 4; x += 4) {
+                if (sh_row) vst1q_u32(sh_row + x, vcol);
                 vst1q_u32(row + x, vcol);
             }
             for (; x < count; x++) {
+                if (sh_row) sh_row[x] = col;
                 row[x] = col;
             }
         }
