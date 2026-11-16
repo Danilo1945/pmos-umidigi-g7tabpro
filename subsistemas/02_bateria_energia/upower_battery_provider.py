@@ -47,8 +47,13 @@ OCV_TABLE_MV10 = [
 ]
 
 _smoothed_soc = None
+_displayed_soc = None
+_last_soc_step_ts = 0.0
+_vbat_window = []
 _tick_counter = 0
 _last_charging = None
+_shared_props = None
+_last_telemetry_ts = 0.0
 
 def read_val(path):
     try:
@@ -193,11 +198,12 @@ def manage_hardware_charging():
         charging = usb_present
 
     if _last_charging is not None and charging != _last_charging:
+        _vbat_window.clear()
         play_plug_sound(charging)
     _last_charging = charging
     return charging
 
-def read_vbat_mv():
+def _read_single_vbat_mv():
     iio_auxadc = find_iio_auxadc()
     iio_mt6375 = find_iio_mt6375()
 
@@ -224,8 +230,30 @@ def read_vbat_mv():
 
     return None
 
+def read_vbat_mv():
+    global _vbat_window
+    samples = []
+    for _ in range(3):
+        s = _read_single_vbat_mv()
+        if s is not None:
+            samples.append(s)
+        time.sleep(0.01)
+    if not samples:
+        return _vbat_window[-1] if _vbat_window else None
+    samples.sort()
+    med = samples[len(samples) // 2]
+    _vbat_window.append(med)
+    if len(_vbat_window) > 11:
+        _vbat_window.pop(0)
+    win_sorted = sorted(_vbat_window)
+    # Promedio recortado (trimmed mean) descartando extremos si hay suficientes muestras
+    if len(win_sorted) >= 5:
+        core = win_sorted[1:-1]
+        return int(round(sum(core) / float(len(core))))
+    return win_sorted[len(win_sorted) // 2]
+
 def compute_telemetry(charging):
-    global _smoothed_soc
+    global _smoothed_soc, _displayed_soc, _last_soc_step_ts
     v_mv = read_vbat_mv()
     if v_mv is None:
         v_mv = 3850
@@ -246,111 +274,150 @@ def compute_telemetry(charging):
         v_ocv = float(v_mv)
 
     raw_soc = calc_soc_mv(v_ocv)
-    if _smoothed_soc is None:
-        _smoothed_soc = float(raw_soc)
-    else:
-        _smoothed_soc = 0.25 * float(raw_soc) + 0.75 * _smoothed_soc
+    now = time.time()
 
-    soc = max(1, min(100, int(_smoothed_soc + 0.5)))
+    if _smoothed_soc is None or _displayed_soc is None:
+        _smoothed_soc = float(raw_soc)
+        _displayed_soc = max(1, min(100, int(_smoothed_soc + 0.5)))
+        _last_soc_step_ts = now
+    else:
+        # Filtro exponencial suave (constante de tiempo ~ 35s con tick de 3s)
+        _smoothed_soc = 0.08 * float(raw_soc) + 0.92 * _smoothed_soc
+        diff = _smoothed_soc - float(_displayed_soc)
+
+        # Banda muerta de histéresis (+/- 0.85%) + filtro monotónico + limitador de rampa (1% cada >= 30s)
+        if (now - _last_soc_step_ts) >= 30.0:
+            if charging:
+                if is_full_hw and _displayed_soc < 100:
+                    _displayed_soc += 1
+                    _last_soc_step_ts = now
+                elif diff >= 0.85 and _displayed_soc < 100:
+                    _displayed_soc += 1
+                    _last_soc_step_ts = now
+                elif diff <= -2.2 and _displayed_soc > 1:
+                    # Solo baja cargando si hay descarga neta sostenida (>2.2% por debajo)
+                    _displayed_soc -= 1
+                    _last_soc_step_ts = now
+            else:
+                # En descarga: estrictamente monotónico decreciente (no sube salvo salto real > 6%)
+                if diff <= -0.85 and _displayed_soc > 1:
+                    _displayed_soc -= 1
+                    _last_soc_step_ts = now
+                elif diff >= 6.0:
+                    _displayed_soc = max(1, min(100, int(_smoothed_soc + 0.5)))
+                    _last_soc_step_ts = now
+
+    soc = _displayed_soc
     write_val(PATH_UI_SOC, soc)
     return soc, v_mv / 1000.0, ibat_ma, is_full_hw
+
+def build_shared_properties(force=False):
+    global _shared_props, _last_telemetry_ts
+    now_f = time.time()
+    if not force and _shared_props is not None and (now_f - _last_telemetry_ts) < 2.2:
+        return _shared_props
+
+    _last_telemetry_ts = now_f
+    charging = manage_hardware_charging()
+    soc, volts, ibat_ma, is_full_hw = compute_telemetry(charging)
+
+    # Estado UPower: 1=Charging, 2=Discharging, 4=Fully charged
+    if charging:
+        state = 4 if (is_full_hw or (soc >= 99 and ibat_ma < 180)) else 1
+        icon_suffix = '-charging-symbolic' if state == 1 else '-charged-symbolic'
+    else:
+        state = 2
+        icon_suffix = '-symbolic'
+
+    if soc >= 90:
+        level_str = 'full'
+    elif soc >= 60:
+        level_str = 'good'
+    elif soc >= 30:
+        level_str = 'medium'
+    elif soc >= 15:
+        level_str = 'low'
+    else:
+        level_str = 'caution'
+
+    icon_name = f'battery-{level_str}{icon_suffix}'
+    now = int(now_f)
+    energy_full = 28.5  # 7500 mAh * 3.8V = 28.5 Wh
+    energy_now = round((soc / 100.0) * energy_full, 2)
+    if charging:
+        eff_ma = max(100, ibat_ma) if state == 1 else 0
+        energy_rate = round((eff_ma * volts) / 1000.0, 2)
+    else:
+        eff_ma = max(250, ibat_ma)
+        energy_rate = round((eff_ma * volts) / 1000.0, 2)
+
+    time_to_empty = 0
+    time_to_full = 0
+    if state == 2 and energy_rate > 0.1:
+        time_to_empty = int((energy_now / energy_rate) * 3600)
+    elif state == 1 and energy_rate > 0.1:
+        time_to_full = int(((energy_full - energy_now) / energy_rate) * 3600)
+
+    if soc <= 5 and not charging:
+        warn_level = 4  # Critical
+    elif soc <= 12 and not charging:
+        warn_level = 3  # Low
+    else:
+        warn_level = 1  # None
+
+    _shared_props = {
+        'NativePath': dbus.String('mt6375-charger'),
+        'Vendor': dbus.String('Mediatek'),
+        'Model': dbus.String('UMIDIGI G7 Tab Pro'),
+        'Serial': dbus.String('TG2403GBA'),
+        'Type': dbus.UInt32(2),                 # UP_DEVICE_KIND_BATTERY = 2
+        'PowerSupply': dbus.Boolean(True),
+        'IsPresent': dbus.Boolean(True),
+        'IsRechargeable': dbus.Boolean(True),
+        'HasHistory': dbus.Boolean(False),
+        'HasStatistics': dbus.Boolean(False),
+        'Online': dbus.Boolean(charging),
+        'State': dbus.UInt32(state),
+        'Technology': dbus.UInt32(2),           # Lithium-polymer
+        'WarningLevel': dbus.UInt32(warn_level),
+        'BatteryLevel': dbus.UInt32(1),         # UP_DEVICE_LEVEL_NONE = 1 (usa Percentage continuo)
+        'Percentage': dbus.Double(float(soc)),
+        'Energy': dbus.Double(energy_now),
+        'EnergyEmpty': dbus.Double(0.0),
+        'EnergyFull': dbus.Double(energy_full),
+        'EnergyFullDesign': dbus.Double(energy_full),
+        'EnergyRate': dbus.Double(energy_rate),
+        'Voltage': dbus.Double(round(volts, 3)),
+        'TimeToEmpty': dbus.Int64(time_to_empty),
+        'TimeToFull': dbus.Int64(time_to_full),
+        'IconName': dbus.String(icon_name),
+        'UpdateTime': dbus.UInt64(now),
+    }
+    return _shared_props
 
 class BatteryDevice(dbus.service.Object):
     def __init__(self, bus, path):
         self.path = path
-        self._p = {}
-        self._refresh()
+        self._p = dict(build_shared_properties(force=False))
         super().__init__(bus, path)
 
     def _refresh(self):
-        charging = manage_hardware_charging()
-        soc, volts, ibat_ma, is_full_hw = compute_telemetry(charging)
-
-        # Estado UPower: 1=Charging, 2=Discharging, 4=Fully charged
-        if charging:
-            state = 4 if (is_full_hw or (soc >= 99 and ibat_ma < 180)) else 1
-            icon_suffix = '-charging-symbolic' if state == 1 else '-charged-symbolic'
-        else:
-            state = 2
-            icon_suffix = '-symbolic'
-
-        if soc >= 90:
-            level_str = 'full'
-        elif soc >= 60:
-            level_str = 'good'
-        elif soc >= 30:
-            level_str = 'medium'
-        elif soc >= 15:
-            level_str = 'low'
-        else:
-            level_str = 'caution'
-
-        icon_name = f'battery-{level_str}{icon_suffix}'
-        now = int(time.time())
-        energy_full = 28.5  # 7500 mAh * 3.8V = 28.5 Wh
-        energy_now = round((soc / 100.0) * energy_full, 2)
-        if charging:
-            eff_ma = max(100, ibat_ma) if state == 1 else 0
-            energy_rate = round((eff_ma * volts) / 1000.0, 2)
-        else:
-            eff_ma = max(250, ibat_ma)
-            energy_rate = round((eff_ma * volts) / 1000.0, 2)
-
-        time_to_empty = 0
-        time_to_full = 0
-        if state == 2 and energy_rate > 0.1:
-            time_to_empty = int((energy_now / energy_rate) * 3600)
-        elif state == 1 and energy_rate > 0.1:
-            time_to_full = int(((energy_full - energy_now) / energy_rate) * 3600)
-
-        if soc <= 5 and not charging:
-            warn_level = 4  # Critical
-        elif soc <= 12 and not charging:
-            warn_level = 3  # Low
-        else:
-            warn_level = 1  # None
-
-        self._p = {
-            'NativePath': dbus.String('mt6375-charger'),
-            'Vendor': dbus.String('Mediatek'),
-            'Model': dbus.String('UMIDIGI G7 Tab Pro'),
-            'Serial': dbus.String('TG2403GBA'),
-            'Type': dbus.UInt32(2),                 # UP_DEVICE_KIND_BATTERY = 2
-            'PowerSupply': dbus.Boolean(True),
-            'IsPresent': dbus.Boolean(True),
-            'IsRechargeable': dbus.Boolean(True),
-            'HasHistory': dbus.Boolean(False),
-            'HasStatistics': dbus.Boolean(False),
-            'Online': dbus.Boolean(charging),
-            'State': dbus.UInt32(state),
-            'Technology': dbus.UInt32(2),           # Lithium-polymer
-            'WarningLevel': dbus.UInt32(warn_level),
-            'BatteryLevel': dbus.UInt32(1),         # UP_DEVICE_LEVEL_NONE = 1 (usa Percentage continuo)
-            'Percentage': dbus.Double(float(soc)),
-            'Energy': dbus.Double(energy_now),
-            'EnergyEmpty': dbus.Double(0.0),
-            'EnergyFull': dbus.Double(energy_full),
-            'EnergyFullDesign': dbus.Double(energy_full),
-            'EnergyRate': dbus.Double(energy_rate),
-            'Voltage': dbus.Double(round(volts, 3)),
-            'TimeToEmpty': dbus.Int64(time_to_empty),
-            'TimeToFull': dbus.Int64(time_to_full),
-            'IconName': dbus.String(icon_name),
-            'UpdateTime': dbus.UInt64(now),
-        }
+        self._p = dict(build_shared_properties(force=False))
 
     @dbus.service.method(PROPS_IFACE, in_signature='s', out_signature='a{sv}')
     def GetAll(self, iface):
         if iface != DEV_IFACE:
             return dbus.Dictionary(signature='sv')
-        self._refresh()
+        if not self._p:
+            self._refresh()
         return dbus.Dictionary(self._p, signature='sv')
 
     @dbus.service.method(PROPS_IFACE, in_signature='ss', out_signature='v')
     def Get(self, iface, prop):
         if iface != DEV_IFACE:
             return dbus.String('')
-        self._refresh()
+        if not self._p:
+            self._refresh()
         return self._p.get(prop, dbus.String(''))
 
     @dbus.service.method(DEV_IFACE, in_signature='', out_signature='')
@@ -480,9 +547,10 @@ def main():
     print('Ready, devices:', paths, flush=True)
 
     def tick():
-        for d in devs:
-            try:
-                d._refresh()
+        try:
+            shared = build_shared_properties(force=True)
+            for d in devs:
+                d._p = dict(shared)
                 d.PropertiesChanged(
                     DEV_IFACE,
                     {
@@ -500,8 +568,8 @@ def main():
                     },
                     []
                 )
-            except Exception as e:
-                print('tick err', e, flush=True)
+        except Exception as e:
+            print('tick err', e, flush=True)
         return True
 
     GLib.timeout_add_seconds(3, tick)
