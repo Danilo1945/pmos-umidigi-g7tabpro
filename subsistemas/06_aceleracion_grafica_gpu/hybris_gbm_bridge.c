@@ -182,7 +182,8 @@ static void init_hybris_syms(void) {
     setenv("HYBRIS_EGLPLATFORM", "null", 1);
     setenv("HYBRIS_LD_LIBRARY_PATH", "/usr/lib/mali_android", 0);
     setenv("HYBRIS_ANDROID_SDK_VERSION", "30", 0);
-    h_egl = dlopen("/usr/lib/libhybris_mali/libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
+    h_egl = dlopen("/usr/lib/libhybris_mali/libhybris_EGL.so.1", RTLD_NOW | RTLD_GLOBAL);
+    if (!h_egl) h_egl = dlopen("/usr/lib/libhybris_mali/libEGL.so.1.0.0", RTLD_NOW | RTLD_GLOBAL);
     if (!h_egl) h_egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_GLOBAL);
     h_gles2 = dlopen("/usr/lib/libhybris_mali/libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
     if (!h_gles2) h_gles2 = dlopen("libGLESv2.so.2", RTLD_LAZY | RTLD_GLOBAL);
@@ -662,6 +663,7 @@ static void register_wl_dpy(void *egl_dpy, void *wl_dpy) {
 
 static int ensure_wl_dmabuf(struct wl_dpy_map *m) {
     if (!m || !m->wl_dpy) return 0;
+    if (!init_wl_syms()) return 0;
     if (m->dmabuf) return 1;
     m->wl_queue = p_wl_display_create_queue(m->wl_dpy);
     void *reg = p_wl_proxy_marshal_flags(m->wl_dpy, 1 /* get_registry */, sym_wl_registry_iface,
@@ -1132,14 +1134,56 @@ unsigned int eglSwapBuffersWithDamageKHR(void *dpy, void *surface, const int *re
 void *eglGetProcAddress(const char *procname) {
     ensure_init();
     if (!procname) return NULL;
+    if (strcmp(procname, "eglGetDisplay") == 0) return (void *)eglGetDisplay;
     if (strcmp(procname, "eglGetPlatformDisplayEXT") == 0) return (void *)eglGetPlatformDisplayEXT;
     if (strcmp(procname, "eglGetPlatformDisplay") == 0) return (void *)eglGetPlatformDisplay;
+    if (strcmp(procname, "eglChooseConfig") == 0) return (void *)eglChooseConfig;
+    if (strcmp(procname, "eglGetConfigAttrib") == 0) return (void *)eglGetConfigAttrib;
+    if (strcmp(procname, "eglCreateWindowSurface") == 0) return (void *)eglCreateWindowSurface;
     if (strcmp(procname, "eglCreatePlatformWindowSurfaceEXT") == 0) return (void *)eglCreatePlatformWindowSurfaceEXT;
     if (strcmp(procname, "eglCreatePlatformWindowSurface") == 0) return (void *)eglCreatePlatformWindowSurface;
+    if (strcmp(procname, "eglDestroySurface") == 0) return (void *)eglDestroySurface;
+    if (strcmp(procname, "eglQuerySurface") == 0) return (void *)eglQuerySurface;
+    if (strcmp(procname, "eglMakeCurrent") == 0) return (void *)eglMakeCurrent;
+    if (strcmp(procname, "eglSwapBuffers") == 0) return (void *)eglSwapBuffers;
     if (strcmp(procname, "eglSwapBuffersWithDamageEXT") == 0) return (void *)eglSwapBuffersWithDamageEXT;
     if (strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) return (void *)eglSwapBuffersWithDamageKHR;
     if (strcmp(procname, "eglQueryString") == 0) return (void *)eglQueryString;
     if (strcmp(procname, "eglCreateImageKHR") == 0) return (void *)eglCreateImageKHR;
     if (strcmp(procname, "glBindFramebuffer") == 0) return (void *)glBindFramebuffer;
     return p_eglGetProcAddress ? p_eglGetProcAddress(procname) : NULL;
+}
+
+#define EGL_FORWARD(ret, name, params, args) \
+    ret name params { \
+        ensure_init(); \
+        static ret (*fn) params = NULL; \
+        if (!fn && h_egl) fn = dlsym(h_egl, #name); \
+        return fn ? fn args : (ret)0; \
+    }
+
+EGL_FORWARD(unsigned int, eglInitialize, (void *dpy, int *major, int *minor), (dpy, major, minor))
+EGL_FORWARD(unsigned int, eglTerminate, (void *dpy), (dpy))
+EGL_FORWARD(int, eglGetError, (void), ())
+EGL_FORWARD(unsigned int, eglBindAPI, (unsigned int api), (api))
+EGL_FORWARD(unsigned int, eglQueryAPI, (void), ())
+EGL_FORWARD(void *, eglCreateContext, (void *dpy, void *config, void *share_context, const int *attrib_list), (dpy, config, share_context, attrib_list))
+EGL_FORWARD(unsigned int, eglDestroyContext, (void *dpy, void *ctx), (dpy, ctx))
+EGL_FORWARD(void *, eglGetCurrentContext, (void), ())
+EGL_FORWARD(void *, eglGetCurrentDisplay, (void), ())
+EGL_FORWARD(unsigned int, eglQueryContext, (void *dpy, void *ctx, int attribute, int *value), (dpy, ctx, attribute, value))
+EGL_FORWARD(unsigned int, eglSwapInterval, (void *dpy, int interval), (dpy, interval))
+EGL_FORWARD(unsigned int, eglWaitClient, (void), ())
+EGL_FORWARD(unsigned int, eglWaitGL, (void), ())
+EGL_FORWARD(unsigned int, eglWaitNative, (int engine), (engine))
+EGL_FORWARD(unsigned int, eglGetConfigs, (void *dpy, void **configs, int config_size, int *num_config), (dpy, configs, config_size, num_config))
+EGL_FORWARD(void *, eglCreatePbufferSurface, (void *dpy, void *config, const int *attrib_list), (dpy, config, attrib_list))
+EGL_FORWARD(unsigned int, eglReleaseThread, (void), ())
+
+void *eglGetCurrentSurface(int readdraw) {
+    ensure_init();
+    if (tls_current_surf) return tls_current_surf;
+    static void *(*fn)(int) = NULL;
+    if (!fn && h_egl) fn = dlsym(h_egl, "eglGetCurrentSurface");
+    return fn ? fn(readdraw) : EGL_NO_SURFACE;
 }
