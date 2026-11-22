@@ -46,6 +46,8 @@ int drmIoctl(int fd, unsigned long request, void *arg) {
 #define EGL_NATIVE_PIXMAP_KHR 0x30B0
 #define EGL_PLATFORM_GBM_KHR 0x31D7
 #define EGL_PLATFORM_GBM_MESA 0x31D7
+#define EGL_PLATFORM_WAYLAND_KHR 0x31D8
+#define EGL_PLATFORM_WAYLAND_EXT 0x31D8
 #define EGL_LINUX_DMA_BUF_EXT 0x3270
 #define EGL_LINUX_DRM_FOURCC_EXT 0x3271
 #define EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
@@ -173,10 +175,13 @@ static void (*p_glEGLImageTargetRenderbufferStorageOES)(unsigned int, void *) = 
 static void (*p_glFinish)(void) = NULL;
 
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
-static __thread struct gbm_surface *tls_current_surf = NULL;
+static __thread void *tls_current_surf = NULL;
 static __thread uint32_t tls_current_fbo = 0;
 
 static void init_hybris_syms(void) {
+    setenv("HYBRIS_EGLPLATFORM", "null", 1);
+    setenv("HYBRIS_LD_LIBRARY_PATH", "/usr/lib/mali_android", 0);
+    setenv("HYBRIS_ANDROID_SDK_VERSION", "30", 0);
     h_egl = dlopen("/usr/lib/libhybris_mali/libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
     if (!h_egl) h_egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_GLOBAL);
     h_gles2 = dlopen("/usr/lib/libhybris_mali/libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
@@ -486,8 +491,220 @@ int gbm_surface_has_free_buffers(struct gbm_surface *surf) {
 }
 
 /* ============================================================================
- * Puente EGL / GLES2 para GBM <-> libhybris (libGLES_mali.so)
+ * Puente EGL / GLES2 para GBM y Wayland DMA-BUF <-> libhybris (libGLES_mali.so)
  * ============================================================================ */
+
+#define WL_SURF_MAGIC 0x574C5352U /* 'WLSR' */
+#define WL_EGL_WINDOW_VERSION 3
+#define WL_MARSHAL_FLAG_DESTROY (1 << 0)
+
+struct wl_egl_window {
+    const intptr_t version;
+    int width;
+    int height;
+    int dx;
+    int dy;
+    int attached_width;
+    int attached_height;
+    void *driver_private;
+    void (*resize_callback)(struct wl_egl_window *, void *);
+    void (*destroy_window_callback)(void *);
+    void *surface;
+};
+
+struct wl_message_mini {
+    const char *name;
+    const char *signature;
+    const void **types;
+};
+
+struct wl_interface_mini {
+    const char *name;
+    int version;
+    int method_count;
+    const struct wl_message_mini *methods;
+    int event_count;
+    const struct wl_message_mini *events;
+};
+
+struct dma_heap_alloc_data {
+    uint64_t len;
+    uint32_t fd;
+    uint32_t fd_flags;
+    uint64_t heap_flags;
+};
+#define DMA_HEAP_IOCTL_ALLOC _IOWR('H', 0x0, struct dma_heap_alloc_data)
+
+static void *h_wl = NULL;
+static const void *sym_wl_display_iface = NULL;
+static const void *sym_wl_registry_iface = NULL;
+static const void *sym_wl_surface_iface = NULL;
+static const void *sym_wl_buffer_iface = NULL;
+
+static void *(*p_wl_display_create_queue)(void *) = NULL;
+static void (*p_wl_event_queue_destroy)(void *) = NULL;
+static int (*p_wl_display_roundtrip_queue)(void *, void *) = NULL;
+static int (*p_wl_display_dispatch_queue_pending)(void *, void *) = NULL;
+static int (*p_wl_display_flush)(void *) = NULL;
+static void (*p_wl_proxy_set_queue)(void *, void *) = NULL;
+static void (*p_wl_proxy_destroy)(void *) = NULL;
+static uint32_t (*p_wl_proxy_get_version)(void *) = NULL;
+static int (*p_wl_proxy_add_listener)(void *, void (**)(void), void *) = NULL;
+static void *(*p_wl_proxy_marshal_flags)(void *, uint32_t, const void *, uint32_t, uint32_t, ...) = NULL;
+
+static struct wl_interface_mini wl_dmabuf_iface;
+static struct wl_interface_mini wl_params_iface;
+static const void *wl_dmabuf_types[16] = {0};
+static struct wl_message_mini wl_dmabuf_reqs[4] = {
+    { "destroy", "", wl_dmabuf_types },
+    { "create_params", "n", wl_dmabuf_types + 6 },
+    { "get_default_feedback", "4n", wl_dmabuf_types + 7 },
+    { "get_surface_feedback", "4no", wl_dmabuf_types + 8 },
+};
+static struct wl_message_mini wl_dmabuf_evts[2] = {
+    { "format", "u", wl_dmabuf_types },
+    { "modifier", "3uuu", wl_dmabuf_types },
+};
+static struct wl_message_mini wl_params_reqs[4] = {
+    { "destroy", "", wl_dmabuf_types },
+    { "add", "huuuuu", wl_dmabuf_types },
+    { "create", "iiuu", wl_dmabuf_types },
+    { "create_immed", "2niiuu", wl_dmabuf_types + 10 },
+};
+static struct wl_message_mini wl_params_evts[2] = {
+    { "created", "n", wl_dmabuf_types + 15 },
+    { "failed", "", wl_dmabuf_types },
+};
+
+static int init_wl_syms(void) {
+    if (p_wl_proxy_marshal_flags) return 1;
+    h_wl = dlopen("libwayland-client.so.0", RTLD_LAZY | RTLD_GLOBAL);
+    if (!h_wl) return 0;
+    sym_wl_display_iface = dlsym(h_wl, "wl_display_interface");
+    sym_wl_registry_iface = dlsym(h_wl, "wl_registry_interface");
+    sym_wl_surface_iface = dlsym(h_wl, "wl_surface_interface");
+    sym_wl_buffer_iface = dlsym(h_wl, "wl_buffer_interface");
+    p_wl_display_create_queue = dlsym(h_wl, "wl_display_create_queue");
+    p_wl_event_queue_destroy = dlsym(h_wl, "wl_event_queue_destroy");
+    p_wl_display_roundtrip_queue = dlsym(h_wl, "wl_display_roundtrip_queue");
+    p_wl_display_dispatch_queue_pending = dlsym(h_wl, "wl_display_dispatch_queue_pending");
+    p_wl_display_flush = dlsym(h_wl, "wl_display_flush");
+    p_wl_proxy_set_queue = dlsym(h_wl, "wl_proxy_set_queue");
+    p_wl_proxy_destroy = dlsym(h_wl, "wl_proxy_destroy");
+    p_wl_proxy_get_version = dlsym(h_wl, "wl_proxy_get_version");
+    p_wl_proxy_add_listener = dlsym(h_wl, "wl_proxy_add_listener");
+    p_wl_proxy_marshal_flags = dlsym(h_wl, "wl_proxy_marshal_flags");
+
+    wl_dmabuf_types[6] = &wl_params_iface;
+    wl_dmabuf_types[9] = sym_wl_surface_iface;
+    wl_dmabuf_types[10] = sym_wl_buffer_iface;
+    wl_dmabuf_types[15] = sym_wl_buffer_iface;
+
+    wl_dmabuf_iface = (struct wl_interface_mini){ "zwp_linux_dmabuf_v1", 4, 4, wl_dmabuf_reqs, 2, wl_dmabuf_evts };
+    wl_params_iface = (struct wl_interface_mini){ "zwp_linux_buffer_params_v1", 4, 4, wl_params_reqs, 2, wl_params_evts };
+
+    return (sym_wl_display_iface && p_wl_proxy_marshal_flags && p_wl_display_create_queue);
+}
+
+struct wl_dpy_map {
+    void *egl_dpy;
+    void *wl_dpy;
+    void *wl_queue;
+    void *dmabuf;
+    uint32_t dmabuf_ver;
+};
+
+#define MAX_WL_DPYS 8
+static struct wl_dpy_map g_wl_dpys[MAX_WL_DPYS];
+static pthread_mutex_t g_wl_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void wl_reg_global(void *data, void *registry, uint32_t name, const char *iface, uint32_t ver) {
+    struct wl_dpy_map *m = (struct wl_dpy_map *)data;
+    if (strcmp(iface, "zwp_linux_dmabuf_v1") == 0) {
+        uint32_t v = ver < 3 ? ver : 3;
+        m->dmabuf = p_wl_proxy_marshal_flags(registry, 0 /* bind */, &wl_dmabuf_iface, v, 0,
+                                             name, wl_dmabuf_iface.name, v, NULL);
+        m->dmabuf_ver = v;
+    }
+}
+static void wl_reg_global_remove(void *data, void *registry, uint32_t name) {
+    (void)data; (void)registry; (void)name;
+}
+static void (*wl_reg_listener[2])(void) = {
+    (void (*)(void))wl_reg_global,
+    (void (*)(void))wl_reg_global_remove
+};
+
+static int is_wl_display(void *ptr) {
+    if (!ptr || (uintptr_t)ptr < 0x10000) return 0;
+    if (!init_wl_syms()) return 0;
+    return (*(void **)ptr == sym_wl_display_iface);
+}
+
+static struct wl_dpy_map *find_wl_map_by_egl(void *egl_dpy) {
+    for (int i = 0; i < MAX_WL_DPYS; i++) {
+        if (g_wl_dpys[i].egl_dpy == egl_dpy) return &g_wl_dpys[i];
+    }
+    return NULL;
+}
+
+static void register_wl_dpy(void *egl_dpy, void *wl_dpy) {
+    pthread_mutex_lock(&g_wl_lock);
+    for (int i = 0; i < MAX_WL_DPYS; i++) {
+        if (g_wl_dpys[i].egl_dpy == egl_dpy || !g_wl_dpys[i].egl_dpy) {
+            g_wl_dpys[i].egl_dpy = egl_dpy;
+            g_wl_dpys[i].wl_dpy = wl_dpy;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_wl_lock);
+}
+
+static int ensure_wl_dmabuf(struct wl_dpy_map *m) {
+    if (!m || !m->wl_dpy) return 0;
+    if (m->dmabuf) return 1;
+    m->wl_queue = p_wl_display_create_queue(m->wl_dpy);
+    void *reg = p_wl_proxy_marshal_flags(m->wl_dpy, 1 /* get_registry */, sym_wl_registry_iface,
+                                         p_wl_proxy_get_version(m->wl_dpy), 0, NULL);
+    if (!reg) return 0;
+    if (m->wl_queue) p_wl_proxy_set_queue(reg, m->wl_queue);
+    p_wl_proxy_add_listener(reg, wl_reg_listener, m);
+    p_wl_display_roundtrip_queue(m->wl_dpy, m->wl_queue);
+    p_wl_proxy_destroy(reg);
+    return (m->dmabuf != NULL);
+}
+
+struct wl_egl_bridge_surface {
+    uint32_t magic;
+    struct wl_egl_window *win;
+    struct wl_dpy_map *map;
+    void *egl_dpy;
+    int width;
+    int height;
+    int dmabuf_fds[NUM_SWAP_BUFFERS];
+    uint32_t strides[NUM_SWAP_BUFFERS];
+    void *wl_bufs[NUM_SWAP_BUFFERS];
+    int busy[NUM_SWAP_BUFFERS];
+    void *egl_images[NUM_SWAP_BUFFERS];
+    uint32_t rbos[NUM_SWAP_BUFFERS];
+    uint32_t depth_rbo;
+    uint32_t fbos[NUM_SWAP_BUFFERS];
+    int back_idx;
+};
+
+static void wl_buf_release(void *data, void *wl_buffer) {
+    struct wl_egl_bridge_surface *surf = (struct wl_egl_bridge_surface *)data;
+    if (!surf || surf->magic != WL_SURF_MAGIC) return;
+    for (int i = 0; i < NUM_SWAP_BUFFERS; i++) {
+        if (surf->wl_bufs[i] == wl_buffer) {
+            surf->busy[i] = 0;
+            break;
+        }
+    }
+}
+static void (*wl_buf_listener[1])(void) = {
+    (void (*)(void))wl_buf_release
+};
 
 static int is_gbm_device(void *ptr) {
     if (!ptr || (uintptr_t)ptr < 0x10000) return 0;
@@ -499,40 +716,139 @@ static int is_gbm_surface(void *ptr) {
     return ((struct gbm_surface *)ptr)->magic == GBM_SURF_MAGIC;
 }
 
+static int is_wl_bridge_surface(void *ptr) {
+    if (!ptr || (uintptr_t)ptr < 0x10000) return 0;
+    return ((struct wl_egl_bridge_surface *)ptr)->magic == WL_SURF_MAGIC;
+}
+
+static int is_wl_egl_window(void *ptr) {
+    if (!ptr || (uintptr_t)ptr < 0x10000) return 0;
+    struct wl_egl_window *w = (struct wl_egl_window *)ptr;
+    return (w->version == WL_EGL_WINDOW_VERSION && w->surface != NULL);
+}
+
+static void build_dmabuf_fbo(void *egl_dpy, int width, int height, uint32_t fourcc,
+                             int fd, uint32_t stride, void **out_img, uint32_t *out_rbo,
+                             uint32_t *depth_rbo, uint32_t *out_fbo) {
+    int attrs[] = {
+        EGL_WIDTH, width,
+        EGL_HEIGHT, height,
+        EGL_LINUX_DRM_FOURCC_EXT, (int)fourcc,
+        EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, (int)stride,
+        EGL_NONE
+    };
+    *out_img = p_eglCreateImageKHR(egl_dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    p_glGenRenderbuffers(1, out_rbo);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, *out_rbo);
+    p_glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, *out_img);
+
+    if (!*depth_rbo) {
+        p_glGenRenderbuffers(1, depth_rbo);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, *depth_rbo);
+        p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8_OES, width, height);
+    }
+
+    p_glGenFramebuffers(1, out_fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, *out_fbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, *out_rbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, *depth_rbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, *depth_rbo);
+}
+
 static void ensure_gbm_fbo(struct gbm_surface *surf, int idx) {
     if (surf->fbos[idx]) return;
     struct gbm_bo *bo = surf->bos[idx];
-    int attrs[] = {
-        EGL_WIDTH, (int)bo->width,
-        EGL_HEIGHT, (int)bo->height,
-        EGL_LINUX_DRM_FOURCC_EXT, (int)gbm_to_mali_fourcc(bo->format),
-        EGL_DMA_BUF_PLANE0_FD_EXT, bo->prime_fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-        EGL_DMA_BUF_PLANE0_PITCH_EXT, (int)bo->stride,
-        EGL_NONE
-    };
-    surf->egl_images[idx] = p_eglCreateImageKHR(surf->egl_dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
-    p_glGenRenderbuffers(1, &surf->rbos[idx]);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, surf->rbos[idx]);
-    p_glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, surf->egl_images[idx]);
+    build_dmabuf_fbo(surf->egl_dpy, (int)bo->width, (int)bo->height,
+                     gbm_to_mali_fourcc(bo->format), bo->prime_fd, bo->stride,
+                     &surf->egl_images[idx], &surf->rbos[idx], &surf->depth_rbo, &surf->fbos[idx]);
+}
 
-    if (!surf->depth_rbo) {
-        p_glGenRenderbuffers(1, &surf->depth_rbo);
-        p_glBindRenderbuffer(GL_RENDERBUFFER, surf->depth_rbo);
-        p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8_OES, (int)bo->width, (int)bo->height);
+static void free_wl_buffers(struct wl_egl_bridge_surface *surf) {
+    for (int i = 0; i < NUM_SWAP_BUFFERS; i++) {
+        if (surf->fbos[i] && p_glDeleteFramebuffers) p_glDeleteFramebuffers(1, &surf->fbos[i]);
+        if (surf->rbos[i] && p_glDeleteRenderbuffers) p_glDeleteRenderbuffers(1, &surf->rbos[i]);
+        if (surf->egl_images[i] && p_eglDestroyImageKHR && surf->egl_dpy)
+            p_eglDestroyImageKHR(surf->egl_dpy, surf->egl_images[i]);
+        if (surf->wl_bufs[i] && p_wl_proxy_marshal_flags)
+            p_wl_proxy_marshal_flags(surf->wl_bufs[i], 0 /* destroy */, NULL,
+                                     p_wl_proxy_get_version(surf->wl_bufs[i]), WL_MARSHAL_FLAG_DESTROY);
+        if (surf->dmabuf_fds[i] >= 0) close(surf->dmabuf_fds[i]);
+        surf->fbos[i] = 0;
+        surf->rbos[i] = 0;
+        surf->egl_images[i] = NULL;
+        surf->wl_bufs[i] = NULL;
+        surf->dmabuf_fds[i] = -1;
+        surf->busy[i] = 0;
     }
+    if (surf->depth_rbo && p_glDeleteRenderbuffers) {
+        p_glDeleteRenderbuffers(1, &surf->depth_rbo);
+        surf->depth_rbo = 0;
+    }
+}
 
-    p_glGenFramebuffers(1, &surf->fbos[idx]);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, surf->fbos[idx]);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, surf->rbos[idx]);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, surf->depth_rbo);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, surf->depth_rbo);
+static int alloc_wl_buffers(struct wl_egl_bridge_surface *surf, int w, int h) {
+    if (w <= 0 || h <= 0) return 0;
+    if (!ensure_wl_dmabuf(surf->map)) return 0;
+    int hfd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+    if (hfd < 0) return 0;
+
+    uint32_t stride = ((uint32_t)w * 4U + 255U) & ~255U;
+    uint64_t size = (uint64_t)stride * (uint64_t)h;
+    surf->width = w;
+    surf->height = h;
+
+    for (int i = 0; i < NUM_SWAP_BUFFERS; i++) {
+        struct dma_heap_alloc_data data = {
+            .len = size,
+            .fd_flags = O_RDWR | O_CLOEXEC,
+            .heap_flags = 0
+        };
+        if (ioctl(hfd, DMA_HEAP_IOCTL_ALLOC, &data) < 0) {
+            close(hfd);
+            free_wl_buffers(surf);
+            return 0;
+        }
+        surf->dmabuf_fds[i] = (int)data.fd;
+        surf->strides[i] = stride;
+
+        void *params = p_wl_proxy_marshal_flags(surf->map->dmabuf, 1 /* create_params */,
+                                                &wl_params_iface, surf->map->dmabuf_ver, 0, NULL);
+        p_wl_proxy_marshal_flags(params, 1 /* add */, NULL, surf->map->dmabuf_ver, 0,
+                                 surf->dmabuf_fds[i], 0U, 0U, stride, 0U, 0U);
+        void *wbuf = p_wl_proxy_marshal_flags(params, 3 /* create_immed */,
+                                              sym_wl_buffer_iface, surf->map->dmabuf_ver, 0,
+                                              NULL, w, h, GBM_FORMAT_ARGB8888, 0U);
+        p_wl_proxy_marshal_flags(params, 0 /* destroy */, NULL, surf->map->dmabuf_ver, WL_MARSHAL_FLAG_DESTROY);
+        if (wbuf && surf->map->wl_queue) {
+            p_wl_proxy_set_queue(wbuf, surf->map->wl_queue);
+            p_wl_proxy_add_listener(wbuf, wl_buf_listener, surf);
+        }
+        surf->wl_bufs[i] = wbuf;
+        surf->busy[i] = 0;
+    }
+    close(hfd);
+    surf->back_idx = 0;
+    return 1;
+}
+
+static void ensure_wl_fbo(struct wl_egl_bridge_surface *surf, int idx) {
+    if (surf->fbos[idx]) return;
+    build_dmabuf_fbo(surf->egl_dpy, surf->width, surf->height,
+                     GBM_FORMAT_ARGB8888, surf->dmabuf_fds[idx], surf->strides[idx],
+                     &surf->egl_images[idx], &surf->rbos[idx], &surf->depth_rbo, &surf->fbos[idx]);
 }
 
 void *eglGetDisplay(void *display_id) {
     ensure_init();
     if (is_gbm_device(display_id)) {
         return p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    }
+    if (is_wl_display(display_id)) {
+        void *dpy = p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        register_wl_dpy(dpy, display_id);
+        return dpy;
     }
     return p_eglGetDisplay(display_id);
 }
@@ -542,6 +858,11 @@ void *eglGetPlatformDisplay(unsigned int platform, void *native_display, const i
     ensure_init();
     if (platform == EGL_PLATFORM_GBM_KHR || is_gbm_device(native_display)) {
         return p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    }
+    if (platform == EGL_PLATFORM_WAYLAND_KHR || is_wl_display(native_display)) {
+        void *dpy = p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        register_wl_dpy(dpy, native_display);
+        return dpy;
     }
     return p_eglGetDisplay(native_display);
 }
@@ -583,6 +904,22 @@ void *eglCreateWindowSurface(void *dpy, void *config, void *win, const int *attr
         surf->egl_dpy = dpy;
         return surf;
     }
+    if (is_wl_egl_window(win)) {
+        struct wl_dpy_map *m = find_wl_map_by_egl(dpy);
+        if (!m) return EGL_NO_SURFACE;
+        struct wl_egl_bridge_surface *surf = calloc(1, sizeof(struct wl_egl_bridge_surface));
+        if (!surf) return EGL_NO_SURFACE;
+        surf->magic = WL_SURF_MAGIC;
+        surf->win = (struct wl_egl_window *)win;
+        surf->map = m;
+        surf->egl_dpy = dpy;
+        for (int i = 0; i < NUM_SWAP_BUFFERS; i++) surf->dmabuf_fds[i] = -1;
+        if (!alloc_wl_buffers(surf, surf->win->width, surf->win->height)) {
+            free(surf);
+            return EGL_NO_SURFACE;
+        }
+        return surf;
+    }
     return p_eglCreateWindowSurface(dpy, config, win, attrib_list);
 }
 
@@ -598,6 +935,12 @@ void *eglCreatePlatformWindowSurface(void *dpy, void *config, void *native_windo
 unsigned int eglDestroySurface(void *dpy, void *surface) {
     ensure_init();
     if (is_gbm_surface(surface)) return EGL_TRUE;
+    if (is_wl_bridge_surface(surface)) {
+        struct wl_egl_bridge_surface *surf = (struct wl_egl_bridge_surface *)surface;
+        free_wl_buffers(surf);
+        free(surf);
+        return EGL_TRUE;
+    }
     return p_eglDestroySurface(dpy, surface);
 }
 
@@ -607,6 +950,12 @@ unsigned int eglQuerySurface(void *dpy, void *surface, int attribute, int *value
         struct gbm_surface *surf = (struct gbm_surface *)surface;
         if (attribute == EGL_WIDTH && value) { *value = (int)surf->width; return EGL_TRUE; }
         if (attribute == EGL_HEIGHT && value) { *value = (int)surf->height; return EGL_TRUE; }
+        return EGL_TRUE;
+    }
+    if (is_wl_bridge_surface(surface)) {
+        struct wl_egl_bridge_surface *surf = (struct wl_egl_bridge_surface *)surface;
+        if (attribute == EGL_WIDTH && value) { *value = surf->win ? surf->win->width : surf->width; return EGL_TRUE; }
+        if (attribute == EGL_HEIGHT && value) { *value = surf->win ? surf->win->height : surf->height; return EGL_TRUE; }
         return EGL_TRUE;
     }
     return p_eglQuerySurface(dpy, surface, attribute, value);
@@ -620,6 +969,17 @@ unsigned int eglMakeCurrent(void *dpy, void *draw, void *read, void *ctx) {
         unsigned int ok = p_eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
         if (!ok) return EGL_FALSE;
         ensure_gbm_fbo(surf, surf->back_idx);
+        tls_current_surf = surf;
+        tls_current_fbo = surf->fbos[surf->back_idx];
+        p_glBindFramebuffer(GL_FRAMEBUFFER, tls_current_fbo);
+        return EGL_TRUE;
+    }
+    if (is_wl_bridge_surface(draw)) {
+        struct wl_egl_bridge_surface *surf = (struct wl_egl_bridge_surface *)draw;
+        surf->egl_dpy = dpy;
+        unsigned int ok = p_eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
+        if (!ok) return EGL_FALSE;
+        ensure_wl_fbo(surf, surf->back_idx);
         tls_current_surf = surf;
         tls_current_fbo = surf->fbos[surf->back_idx];
         p_glBindFramebuffer(GL_FRAMEBUFFER, tls_current_fbo);
@@ -650,6 +1010,50 @@ unsigned int eglSwapBuffers(void *dpy, void *surface) {
         }
         return EGL_TRUE;
     }
+    if (is_wl_bridge_surface(surface)) {
+        struct wl_egl_bridge_surface *surf = (struct wl_egl_bridge_surface *)surface;
+        struct wl_egl_window *win = surf->win;
+        if (!win || !win->surface) return EGL_FALSE;
+        if (p_glFinish) p_glFinish();
+
+        int idx = surf->back_idx;
+        uint32_t sver = p_wl_proxy_get_version(win->surface);
+        p_wl_proxy_marshal_flags(win->surface, 1 /* attach */, NULL, sver, 0,
+                                 surf->wl_bufs[idx], win->dx, win->dy);
+        p_wl_proxy_marshal_flags(win->surface, 2 /* damage */, NULL, sver, 0,
+                                 0, 0, surf->width, surf->height);
+        p_wl_proxy_marshal_flags(win->surface, 6 /* commit */, NULL, sver, 0);
+        p_wl_display_flush(surf->map->wl_dpy);
+
+        surf->busy[idx] = 1;
+        win->dx = 0;
+        win->dy = 0;
+        win->attached_width = surf->width;
+        win->attached_height = surf->height;
+
+        if (surf->map->wl_queue) {
+            p_wl_display_dispatch_queue_pending(surf->map->wl_dpy, surf->map->wl_queue);
+        }
+
+        if (win->width != surf->width || win->height != surf->height) {
+            free_wl_buffers(surf);
+            alloc_wl_buffers(surf, win->width, win->height);
+        } else {
+            for (int i = 1; i <= NUM_SWAP_BUFFERS; i++) {
+                int cand = (idx + i) % NUM_SWAP_BUFFERS;
+                if (!surf->busy[cand]) {
+                    surf->back_idx = cand;
+                    break;
+                }
+            }
+        }
+        if (tls_current_surf == surf) {
+            ensure_wl_fbo(surf, surf->back_idx);
+            tls_current_fbo = surf->fbos[surf->back_idx];
+            p_glBindFramebuffer(GL_FRAMEBUFFER, tls_current_fbo);
+        }
+        return EGL_TRUE;
+    }
     return p_eglSwapBuffers(dpy, surface);
 }
 
@@ -667,8 +1071,6 @@ void *eglCreateImageKHR(void *dpy, void *ctx, unsigned int target, void *buffer,
     ensure_init();
     if (target == EGL_NATIVE_PIXMAP_KHR && buffer) {
         struct gbm_bo *bo = (struct gbm_bo *)buffer;
-        fprintf(stderr, "[bridge] eglCreateImageKHR bo=%p w=%u h=%u stride=%u fmt=0x%x fd=%d\n",
-                bo, bo->width, bo->height, bo->stride, bo->format, bo->prime_fd);
         int attrs[] = {
             EGL_WIDTH, (int)bo->width,
             EGL_HEIGHT, (int)bo->height,
@@ -678,11 +1080,25 @@ void *eglCreateImageKHR(void *dpy, void *ctx, unsigned int target, void *buffer,
             EGL_DMA_BUF_PLANE0_PITCH_EXT, (int)bo->stride,
             EGL_NONE
         };
-        void *res = p_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
-        fprintf(stderr, "[bridge] eglCreateImageKHR -> %p\n", res);
-        return res;
+        return p_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
     }
-    return p_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list);
+    void *res = p_eglCreateImageKHR(dpy, ctx, target, buffer, attrib_list);
+    if (!res && target == EGL_LINUX_DMA_BUF_EXT && attrib_list) {
+        int clean[64];
+        int j = 0;
+        for (int i = 0; attrib_list[i] != EGL_NONE && j < 60; i += 2) {
+            int k = attrib_list[i];
+            int v = attrib_list[i + 1];
+            if (k == 0x3443 /* MODIFIER_LO */ || k == 0x3444 /* MODIFIER_HI */ || k == 0x30D2 /* PRESERVED */) {
+                continue;
+            }
+            clean[j++] = k;
+            clean[j++] = v;
+        }
+        clean[j] = EGL_NONE;
+        res = p_eglCreateImageKHR(dpy, ctx, target, buffer, clean);
+    }
+    return res;
 }
 
 const char *eglQueryString(void *dpy, int name) {
@@ -693,7 +1109,7 @@ const char *eglQueryString(void *dpy, int name) {
         static char ext_buf_dpy[4096];
         char *dst = (dpy == EGL_NO_DISPLAY) ? ext_buf_nodpy : ext_buf_dpy;
         size_t cap = (dpy == EGL_NO_DISPLAY) ? sizeof(ext_buf_nodpy) : sizeof(ext_buf_dpy);
-        snprintf(dst, cap, "%s%sEGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_KHR_image_base EGL_EXT_image_dma_buf_import",
+        snprintf(dst, cap, "%s%sEGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_KHR_platform_wayland EGL_EXT_platform_wayland EGL_KHR_image_base EGL_EXT_image_dma_buf_import",
                  base ? base : "", (base && base[0]) ? " " : "");
         return dst;
     }
@@ -702,7 +1118,7 @@ const char *eglQueryString(void *dpy, int name) {
 
 unsigned int eglSwapBuffersWithDamageEXT(void *dpy, void *surface, const int *rects, int n_rects) {
     ensure_init();
-    if (is_gbm_surface(surface)) {
+    if (is_gbm_surface(surface) || is_wl_bridge_surface(surface)) {
         return eglSwapBuffers(dpy, surface);
     }
     return p_eglSwapBuffersWithDamageEXT ? p_eglSwapBuffersWithDamageEXT(dpy, surface, rects, n_rects)
