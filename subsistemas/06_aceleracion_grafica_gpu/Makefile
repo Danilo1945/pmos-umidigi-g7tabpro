@@ -15,7 +15,7 @@ libmali_shim.so: gpu_interface_driver.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 libhybris_gbm_bridge.so: hybris_gbm_bridge.c
-	$(CC) -O2 -fPIC -Wall $(DRM_INC) $< -o $@ $(LDFLAGS)
+	$(CC) -O2 -fPIC -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $(DRM_INC) $< -o $@ $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)
