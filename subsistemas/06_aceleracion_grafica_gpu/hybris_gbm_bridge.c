@@ -279,7 +279,7 @@ struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width, uint32_t he
     if (!gbm || width == 0 || height == 0) return NULL;
 
     struct drm_mode_create_dumb creq = {
-        .width = width,
+        .width = (width + 15U) & ~15U, /* Alinear pitch a 64 bytes para Mali DMA-BUF */
         .height = height,
         .bpp = 32
     };
