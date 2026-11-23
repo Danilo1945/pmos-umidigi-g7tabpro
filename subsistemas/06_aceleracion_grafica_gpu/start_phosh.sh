@@ -249,12 +249,13 @@ fi
 export SDL_VIDEODRIVER=wayland
 export SDL_RENDER_DRIVER=opengles2
 export LIBGL_ES=2
+export PULSE_LATENCY_MSEC=60
 export LD_LIBRARY_PATH="/usr/lib/libhybris_mali"
 export HYBRIS_LD_LIBRARY_PATH="/usr/lib/mali_android"
 export HYBRIS_ANDROID_SDK_VERSION=30
 export HYBRIS_EGLPLATFORM=null
 export LD_PRELOAD="/usr/lib/libhybris_gbm_bridge.so /usr/lib/libhybris_mali/libEGL.so.1 /usr/lib/libhybris_mali/libGLESv2.so.2 /usr/lib/libphosh_backlight_shim.so"
-dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND SDL_VIDEODRIVER SDL_RENDER_DRIVER LIBGL_ES HOME USER LANG LC_ALL LANGUAGE LD_LIBRARY_PATH HYBRIS_LD_LIBRARY_PATH HYBRIS_ANDROID_SDK_VERSION HYBRIS_EGLPLATFORM LD_PRELOAD 2>/dev/null || true
+dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR GSK_RENDERER GDK_BACKEND SDL_VIDEODRIVER SDL_RENDER_DRIVER LIBGL_ES PULSE_LATENCY_MSEC HOME USER LANG LC_ALL LANGUAGE LD_LIBRARY_PATH HYBRIS_LD_LIBRARY_PATH HYBRIS_ANDROID_SDK_VERSION HYBRIS_EGLPLATFORM LD_PRELOAD 2>/dev/null || true
 
 echo "[wrapper] Lanzando sesion GNOME Mobile Phosh con aceleracion GPU completa..." >> /var/log/phosh_user.log
 exec /usr/libexec/phosh -U >> /var/log/phosh_user.log 2>&1
