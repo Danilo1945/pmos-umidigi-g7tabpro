@@ -434,6 +434,7 @@ if [ -f /usr/lib/firefox/firefox-real ]; then
     cat << 'FFEOF' > /usr/lib/firefox/firefox
 #!/bin/sh
 export LD_PRELOAD=/usr/lib/libjemalloc.so.2
+unset LD_LIBRARY_PATH HYBRIS_LD_LIBRARY_PATH HYBRIS_ANDROID_SDK_VERSION HYBRIS_EGLPLATFORM
 export HOME=/root
 export USER=root
 export XDG_RUNTIME_DIR=/tmp/runtime-root
