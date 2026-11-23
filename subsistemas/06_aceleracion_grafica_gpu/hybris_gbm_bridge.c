@@ -883,6 +883,9 @@ unsigned int eglChooseConfig(void *dpy, const int *attrib_list, void **configs, 
         int attr = attrib_list[i];
         int val = attrib_list[i + 1];
         if (attr == 0x302E /* EGL_NATIVE_VISUAL_ID */ || attr == 0x3142 /* EGL_MATCH_NATIVE_PIXMAP */) continue;
+        if (attr == 0x3040 /* EGL_RENDERABLE_TYPE */ && (val & 0x0008 /* EGL_OPENGL_BIT */)) {
+            val = (val & ~0x0008) | 0x0004 /* EGL_OPENGL_ES2_BIT */;
+        }
         clean[j++] = attr;
         clean[j++] = val;
     }
@@ -1020,6 +1023,10 @@ unsigned int eglSwapBuffers(void *dpy, void *surface) {
 
         int idx = surf->back_idx;
         uint32_t sver = p_wl_proxy_get_version(win->surface);
+        if (sver >= 2) {
+            p_wl_proxy_marshal_flags(win->surface, 5 /* set_buffer_transform */, NULL, sver, 0,
+                                     6 /* WL_OUTPUT_TRANSFORM_FLIPPED_180 */);
+        }
         p_wl_proxy_marshal_flags(win->surface, 1 /* attach */, NULL, sver, 0,
                                  surf->wl_bufs[idx], win->dx, win->dy);
         p_wl_proxy_marshal_flags(win->surface, 2 /* damage */, NULL, sver, 0,
@@ -1131,6 +1138,9 @@ unsigned int eglSwapBuffersWithDamageKHR(void *dpy, void *surface, const int *re
     return eglSwapBuffersWithDamageEXT(dpy, surface, rects, n_rects);
 }
 
+unsigned int eglBindAPI(unsigned int api);
+void *eglCreateContext(void *dpy, void *config, void *share_context, const int *attrib_list);
+
 void *eglGetProcAddress(const char *procname) {
     ensure_init();
     if (!procname) return NULL;
@@ -1150,6 +1160,8 @@ void *eglGetProcAddress(const char *procname) {
     if (strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) return (void *)eglSwapBuffersWithDamageKHR;
     if (strcmp(procname, "eglQueryString") == 0) return (void *)eglQueryString;
     if (strcmp(procname, "eglCreateImageKHR") == 0) return (void *)eglCreateImageKHR;
+    if (strcmp(procname, "eglBindAPI") == 0) return (void *)eglBindAPI;
+    if (strcmp(procname, "eglCreateContext") == 0) return (void *)eglCreateContext;
     if (strcmp(procname, "glBindFramebuffer") == 0) return (void *)glBindFramebuffer;
     return p_eglGetProcAddress ? p_eglGetProcAddress(procname) : NULL;
 }
@@ -1165,19 +1177,64 @@ void *eglGetProcAddress(const char *procname) {
 EGL_FORWARD(unsigned int, eglInitialize, (void *dpy, int *major, int *minor), (dpy, major, minor))
 EGL_FORWARD(unsigned int, eglTerminate, (void *dpy), (dpy))
 EGL_FORWARD(int, eglGetError, (void), ())
-EGL_FORWARD(unsigned int, eglBindAPI, (unsigned int api), (api))
 EGL_FORWARD(unsigned int, eglQueryAPI, (void), ())
-EGL_FORWARD(void *, eglCreateContext, (void *dpy, void *config, void *share_context, const int *attrib_list), (dpy, config, share_context, attrib_list))
+
+unsigned int eglBindAPI(unsigned int api) {
+    ensure_init();
+    static unsigned int (*fn)(unsigned int) = NULL;
+    if (!fn && h_egl) fn = dlsym(h_egl, "eglBindAPI");
+    if (api == 0x30A2 /* EGL_OPENGL_API */) api = 0x30A0 /* EGL_OPENGL_ES_API */;
+    return fn ? fn(api) : 0;
+}
+
+void *eglCreateContext(void *dpy, void *config, void *share_context, const int *attrib_list) {
+    ensure_init();
+    static void *(*fn)(void *, void *, void *, const int *) = NULL;
+    if (!fn && h_egl) fn = dlsym(h_egl, "eglCreateContext");
+    if (!fn) return EGL_NO_CONTEXT;
+    int clean[32];
+    int j = 0;
+    int has_ver = 0;
+    if (attrib_list) {
+        for (int i = 0; attrib_list[i] != EGL_NONE && j < 26; i += 2) {
+            int attr = attrib_list[i];
+            int val = attrib_list[i + 1];
+            if (attr == 0x30FD /* PROFILE_MASK */ || attr == 0x30FB /* MINOR_VERSION */ || attr == 0x30FC /* FLAGS */) continue;
+            if (attr == 0x3098 /* MAJOR_VERSION / CLIENT_VERSION */) {
+                has_ver = 1;
+                if (val < 2) val = 2;
+                if (val > 3) val = 3;
+            }
+            clean[j++] = attr;
+            clean[j++] = val;
+        }
+    }
+    if (!has_ver) {
+        clean[j++] = 0x3098; /* EGL_CONTEXT_CLIENT_VERSION */
+        clean[j++] = 2;
+    }
+    clean[j] = EGL_NONE;
+    return fn(dpy, config, share_context, clean);
+}
 EGL_FORWARD(unsigned int, eglDestroyContext, (void *dpy, void *ctx), (dpy, ctx))
 EGL_FORWARD(void *, eglGetCurrentContext, (void), ())
 EGL_FORWARD(void *, eglGetCurrentDisplay, (void), ())
 EGL_FORWARD(unsigned int, eglQueryContext, (void *dpy, void *ctx, int attribute, int *value), (dpy, ctx, attribute, value))
-EGL_FORWARD(unsigned int, eglSwapInterval, (void *dpy, int interval), (dpy, interval))
 EGL_FORWARD(unsigned int, eglWaitClient, (void), ())
+
+unsigned int eglSwapInterval(void *dpy, int interval) {
+    ensure_init();
+    if (tls_current_surf) return EGL_TRUE;
+    static unsigned int (*fn)(void *, int) = NULL;
+    if (!fn && h_egl) fn = dlsym(h_egl, "eglSwapInterval");
+    return fn ? fn(dpy, interval) : EGL_TRUE;
+}
 EGL_FORWARD(unsigned int, eglWaitGL, (void), ())
 EGL_FORWARD(unsigned int, eglWaitNative, (int engine), (engine))
 EGL_FORWARD(unsigned int, eglGetConfigs, (void *dpy, void **configs, int config_size, int *num_config), (dpy, configs, config_size, num_config))
 EGL_FORWARD(void *, eglCreatePbufferSurface, (void *dpy, void *config, const int *attrib_list), (dpy, config, attrib_list))
+EGL_FORWARD(void *, eglCreatePixmapSurface, (void *dpy, void *config, void *pixmap, const int *attrib_list), (dpy, config, pixmap, attrib_list))
+EGL_FORWARD(unsigned int, eglCopyBuffers, (void *dpy, void *surface, void *target), (dpy, surface, target))
 EGL_FORWARD(unsigned int, eglReleaseThread, (void), ())
 
 void *eglGetCurrentSurface(int readdraw) {
