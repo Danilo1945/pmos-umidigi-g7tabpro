@@ -1102,6 +1102,7 @@ struct dumb_bo_entry {
     uint32_t format;
     uint64_t size;
     void *cpu_map;
+    int is_unrotated;
 };
 
 static struct dumb_bo_entry g_dumb_table[MAX_DUMB_ENTRIES] = {0};
@@ -1949,6 +1950,7 @@ static GLboolean g_scissor_enabled = 0;
 static GLint g_sc_x = 0, g_sc_y = 0, g_sc_w = 1200, g_sc_h = 1920;
 static GLboolean g_blend_enabled = 0;
 static int g_pending_gpu_clear = 0;
+static int g_last_fbo_unrotated = 0;
 static const float *g_attrib0_ptr = NULL;
 static GLint g_attrib0_size = 2;
 static GLsizei g_attrib0_stride = 0;
@@ -1981,11 +1983,24 @@ static struct dumb_bo_entry *find_egl_image_dumb(void *img) {
     return NULL;
 }
 
+static struct dumb_bo_entry s_offscreen_fbo_dumb = {0};
+
 static struct dumb_bo_entry *get_active_fbo_dumb(void) {
     if (g_bound_fbo > 0 && g_bound_fbo < MAX_SHADOW_FBOS) {
         GLuint rbo = g_fbo_rbo[g_bound_fbo];
         if (rbo > 0 && rbo < MAX_SHADOW_RBOS && g_rbo_dumb[rbo]) {
             return g_rbo_dumb[rbo];
+        }
+        GLuint tex = g_fbo_tex[g_bound_fbo];
+        if ((tex > 0 && tex < MAX_SHADOW_TEXTURES) || g_bound_fbo > 2) {
+            if (!s_offscreen_fbo_dumb.cpu_map) {
+                s_offscreen_fbo_dumb.width = 1920;
+                s_offscreen_fbo_dumb.height = 1920;
+                s_offscreen_fbo_dumb.stride = 1920 * 4;
+                s_offscreen_fbo_dumb.size = 1920ULL * 1920ULL * 4ULL;
+                s_offscreen_fbo_dumb.cpu_map = calloc(1920 * 1920, sizeof(uint32_t));
+            }
+            return &s_offscreen_fbo_dumb;
         }
         /* En wlroots gles2, cada FBO de scanout (1, 2, 3...) corresponde secuencialmente a los dumb_bo de scanout (0, 1, 2...) */
         int idx = (int)g_bound_fbo - 1;
@@ -2455,7 +2470,7 @@ static int g_shadow_fb_h = 0;
 static int g_shadow_fb_stride_px = 0;
 
 static inline uint32_t *get_shadow_fb(struct dumb_bo_entry *d) {
-    if (!d || d->width == 0 || d->height == 0 || d->stride == 0) return NULL;
+    if (!d || d == &s_offscreen_fbo_dumb || d->width != 1200 || d->height != 1920 || d->stride == 0) return NULL;
     int w = (int)d->width;
     int h = (int)d->height;
     int s = (int)(d->stride / 4);
@@ -2511,14 +2526,15 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         int is_rgba = (format == 0x1908 /* GL_RGBA */);
         int fb_w = (int)d->width;
         int fb_h = (int)d->height;
+        int unrot = d->is_unrotated;
         for (int row = 0; row < height; row++) {
-            int py = y + row;
+            int py = unrot ? (y + height - 1 - row) : (y + row);
             if (py < 0 || py >= fb_h) continue;
             int target_py = fb_h - 1 - py;
             const uint32_t *src_row = src_base + target_py * stride_px;
             uint32_t *dst_row = dst32 + row * width;
             for (int col = 0; col < width; col++) {
-                int px_x = x + col;
+                int px_x = unrot ? (x + width - 1 - col) : (x + col);
                 if (px_x < 0 || px_x >= fb_w) continue;
                 int target_px = fb_w - 1 - px_x;
                 uint32_t px = src_row[target_px]; /* 0xAARRGGBB */
@@ -2985,6 +3001,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (sy[i] > max_sy) max_sy = sy[i];
     }
 
+    if ((sx[2] - sx[0]) < -1.0f && (sy[1] - sy[0]) < -1.0f) {
+        d->is_unrotated = 1;
+    } else if ((sx[2] - sx[0]) > 1.0f && (sy[1] - sy[0]) > 1.0f) {
+        d->is_unrotated = 0;
+    }
+
     int x0 = (int)(min_sx + 0.5f);
     int x1 = (int)(max_sx + 0.5f);
     int y0 = (int)(min_sy + 0.5f);
@@ -3132,6 +3154,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         /* Detección de quads rotados (90°/270°) o invertidos mediante mapeo afín 2D (sx, sy) -> (u, v) */
         float dx_a = sx[2] - sx[0], dy_a = sy[2] - sy[0];
         float dx_b = sx[1] - sx[0], dy_b = sy[1] - sy[0];
+        if (dx_a < -1.0f && dy_b < -1.0f) {
+            g_last_fbo_unrotated = 1;
+        } else if (dx_a > 1.0f && dy_b > 1.0f) {
+            g_last_fbo_unrotated = 0;
+        }
         if (fabsf(dx_b) > 1.0f || fabsf(dy_a) > 1.0f || dx_a < -1.0f || dy_b < -1.0f) {
             float det = dx_a * dy_b - dx_b * dy_a;
             if (fabsf(det) > 1e-3f) {
