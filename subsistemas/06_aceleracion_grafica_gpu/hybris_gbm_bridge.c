@@ -1024,7 +1024,7 @@ unsigned int eglSwapBuffers(void *dpy, void *surface) {
         int idx = surf->back_idx;
         uint32_t sver = p_wl_proxy_get_version(win->surface);
         if (sver >= 2) {
-            p_wl_proxy_marshal_flags(win->surface, 5 /* set_buffer_transform */, NULL, sver, 0,
+            p_wl_proxy_marshal_flags(win->surface, 7 /* set_buffer_transform */, NULL, sver, 0,
                                      6 /* WL_OUTPUT_TRANSFORM_FLIPPED_180 */);
         }
         p_wl_proxy_marshal_flags(win->surface, 1 /* attach */, NULL, sver, 0,
